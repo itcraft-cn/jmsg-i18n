@@ -1,5 +1,7 @@
 # jmsg-i18n
 
+中文文档 | [English](README.md)
+
 高性能Java多语言消息模板系统，支持 `{}` (Simple) 和 `{name}` (Named) 双占位符风格。
 
 ## 特性
@@ -180,7 +182,7 @@ mvn clean compile test-compile
 
 ## 依赖项目
 
-基于 [dyenums](https://github.com/anomalyco/dyenums) 动态枚举框架构建。
+基于 [dyenums](https://github.com/itcraft-cn/dyenums) 动态枚举框架构建。
 
 ## License
 

@@ -1,5 +1,7 @@
 # jmsg-i18n
 
+[中文文档](README_cn.md) | English
+
 A high-performance multi-language message template system for Java, supporting both `{}` (Simple) and `{name}` (Named) placeholder styles.
 
 ## Features
@@ -177,6 +179,10 @@ mvn clean compile test-compile
 ./run_bench.sh MsgTemplateBenchmark
 ./run_bench.sh TemplateCompareBenchmark
 ```
+
+## Dependencies
+
+Built on [dyenums](https://github.com/itcraft-cn/dyenums) dynamic enum framework.
 
 ## License
 
