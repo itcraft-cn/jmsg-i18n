@@ -1,16 +1,57 @@
-# {project.title placeholder}
+# jmsg-i18n
 
-## {project.desc placeholder}
+## 项目简介
 
-## {project.other1 placeholder}
+基于dyenums的高性能多语言消息模板系统，支持 `{}` (Simple) 和 `{name}` (Named) 双占位符风格，用于错误码、日志消息、业务提示等场景的国际化渲染。
 
-## {project.other2 placeholder}
+## 核心特性
 
-## {project.other3 placeholder}
+- **双模板风格**: Simple `{}` 位置占位符 + Named `{name}` 命名占位符
+- **高性能**: 预编译模板、StringBuilderPool池化、ReflectCache反射缓存
+- **多语言**: 中/英文模板内置，Locale回退链支持
+- **灵活加载**: FileMsgTemplateLoader/PropMsgTemplateLoader，可扩展数据库源
+- **Builder模式**: 流式API简洁易用
 
-## ...
+## 性能数据
 
-## {project.otherN placeholder}
+JMH基准测试 (JDK 25, 4线程):
+
+| 指标 | 吞吐量 | 说明 |
+|------|--------|------|
+| jmsg_simple | 92M ops/s | 比 MessageFormat 快 **4.9倍** |
+| jmsg_namedMap | 58M ops/s | 比 MessageFormat 快 3.1倍 |
+| ReflectCache | 258M ops/s | 比无缓存快 **10倍** |
+| StringBuilderPool | 297M ops/s | ThreadLocal池化 |
+
+## 模块结构
+
+```
+src/main/java/cn/itcraft/jmsg/
+├── core/          # 核心: MsgTemplate接口、编译器、渲染器
+├── util/          # 工具: StringBuilderPool、ReflectCache、LocaleHelper
+├── loader/        # 加载器: File/Prop MsgTemplateLoader
+├── builder/       # Builder: MsgTemplateBuilder、SimpleBuilder、NamedBuilder
+└── benchmark/     # JMH基准测试
+```
+
+## API使用示例
+
+```java
+// 初始化
+MsgTemplateConfig.setDefaultLocale(Locale.CHINA);
+FileMsgTemplateLoader.forSimple("templates.properties").load(MsgTemplate.class, null);
+
+// Simple风格
+MsgTemplateBuilder.create().code("ERR_001").simple().args("错误原因").render();
+
+// Named风格 - Map
+Map<String, Object> args = new HashMap<>();
+args.put("userId", "admin");
+MsgTemplateBuilder.create().code("LOG_001").named().args(args).render();
+
+// Named风格 - Bean
+MsgTemplateBuilder.create().code("LOG_001").named().bean(event).render();
+```
 
 ## AI guide
 
@@ -30,7 +71,15 @@
 
 ### 环境信息
 
-通过 skill /java-env 获取
+通过 skill `/java-env` 获取
+
+### 项目信息
+
+- **Java版本**: 8+ (当前测试 JDK 25)
+- **构建工具**: Maven / mvnd
+- **依赖**: dyenums-core 1.0.0, dyenums-loader-file 1.0.0
+- **测试框架**: JUnit 4.13, JMH 1.37
+- **编码规范**: 参考 `/disk2/helly_data/code/markdown/self-ai-spec/lang-spec/spec.java.md`
 
 ### 交互规则
 
@@ -41,14 +90,32 @@
 5. git 提交均遵循约定式提交规范（Conventional Commits）执行
 6. 重要内容/TODO Plan，随时记录到 MEMORY.md，版本管理忽略该文件，写入 .gitignore，不提交到 Git
 
+### 常用命令
+
+```bash
+# 编译
+mvn clean compile -q
+mvnd clean compile -q  # 推荐
+
+# 测试
+mvn test -q
+mvn test -Dtest=MsgTemplateIntegrationTest -q
+
+# 打包
+mvn clean package -DskipTests -q
+
+# JMH基准测试
+./run_bench.sh MsgTemplateBenchmark
+./run_bench.sh TemplateCompareBenchmark
+
+# 快速验证测试
+./run_bench.sh MsgTemplateBenchmark "-wi 3 -i 3 -t 1 -f 1"
+```
+
 ### 编码规范
 
-授权读取：/disk2/helly_data/code/markdown/self-ai-spec/lang-spec/spec.java.md
-
-Read /disk2/helly_data/code/markdown/self-ai-spec/lang-spec/spec.java.md
+授权读取：`/disk2/helly_data/code/markdown/self-ai-spec/lang-spec/spec.java.md`
 
 ### 构建工具
 
-授权读取：/disk2/helly_data/code/markdown/self-ai-spec/lang-spec/ci.java.md
-
-Read /disk2/helly_data/code/markdown/self-ai-spec/lang-spec/ci.java.md
+授权读取：`/disk2/helly_data/code/markdown/self-ai-spec/lang-spec/ci.java.md`
