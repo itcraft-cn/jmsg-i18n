@@ -7,15 +7,16 @@
 
 ### 1.2 核心需求
 - 支持参数化模板（占位符替换）
-- 支持双模板风格：{} (SLF4J) 和 {name} (命名参数)，分离实现
+- 支持双模板风格：{} (Simple) 和 {name} (Named)，分离实现
 - 通用消息模板设计，可扩展错误码、日志、通知等
 - 加载器多态设计，默认文件模式，其他数据源由用户自行扩展
 - 提供静态方法+Builder双API风格
 - 预编译模板，高性能渲染
 - Named风格支持Map参数和Bean参数（反射），缓存getter方法
+- 默认Locale可配置（全局配置或API设置）
 
 ### 1.3 选定方案
-方案C优化：MsgTemplate接口 + 双实现类 + 预编译模板引擎 + 反射缓存
+方案C优化：MsgTemplate接口 + 双实现类 + 预编译模板引擎 + 反射缓存 + 全局配置
 
 ---
 
@@ -27,18 +28,19 @@
 cn.itcraft.jmsg
 ├── core
 │   ├── MsgTemplate.java          # 接口定义
-│   ├── Slf4jMsgTemplate.java     # {}风格实现
+│   ├── SimpleMsgTemplate.java    # {}风格实现（原名Slf4jMsgTemplate）
 │   ├── NamedMsgTemplate.java     # {name}风格实现
 │   ├── CompiledTemplate.java     # 预编译模板结构
 │   ├── TemplateCompiler.java     # 模板预编译器
-│   └── TemplateRenderer.java     # 渲染执行器（含反射缓存）
+│   ├── TemplateRenderer.java     # 渲染执行器（含反射缓存）
+│   └── MsgTemplateConfig.java    # 全局配置（默认Locale等）
 ├── loader
 │   ├── MsgTemplateLoader.java    # 加载器接口
 │   ├── FileMsgTemplateLoader.java# 文件加载器（默认）
 │   └── PropMsgTemplateLoader.java# Properties加载器
 ├── builder
 │   ├── MsgTemplateBuilder.java   # Builder构建器（统一入口）
-│   ├── Slf4jBuilder.java         # {}风格Builder
+│   ├── SimpleBuilder.java        # {}风格Builder（原名Slf4jBuilder）
 │   └── NamedBuilder.java         # {name}风格Builder
 └── util
     ├── LocaleHelper.java         # Locale辅助工具
@@ -50,12 +52,18 @@ cn.itcraft.jmsg
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      应用层                                  │
-│   MsgTemplate.get() / MsgTemplate.builder().render()         │
+│   MsgTemplate.render(args) / Builder.render()                 │
+├─────────────────────────────────────────────────────────────┤
+│   MsgTemplateConfig (全局配置)                                │
+│   ├── defaultLocale: Locale        默认语言                  │
+│   ├── reflectCacheMaxSize: int     反射缓存容量              │
 ├─────────────────────────────────────────────────────────────┤
 │   MsgTemplate (接口)                                          │
-│   ├── Slf4jMsgTemplate ({}风格实现)                           │
+│   ├── render(locale, args) -> String                         │
+│   ├── render(args) -> String       使用默认Locale            │
+│   ├── SimpleMsgTemplate ({}风格)                              │
 │   │   └── compiled: Map<Locale, CompiledTemplate>            │
-│   ├── NamedMsgTemplate ({name}风格实现)                       │
+│   ├── NamedMsgTemplate ({name}风格)                           │
 │   │   └── compiled: Map<Locale, CompiledTemplate>            │
 ├─────────────────────────────────────────────────────────────┤
 │   CompiledTemplate (预编译模板结构)                           │
@@ -64,17 +72,17 @@ cn.itcraft.jmsg
 │   ├── paramNames: String[]       {name}参数名                │
 ├─────────────────────────────────────────────────────────────┤
 │   TemplateCompiler (预编译器)                                │
-│   ├── compileSlf4j(template) -> CompiledTemplate             │
+│   ├── compileSimple(template) -> CompiledTemplate             │
 │   ├── compileNamed(template) -> CompiledTemplate             │
 ├─────────────────────────────────────────────────────────────┤
 │   TemplateRenderer (渲染执行器)                              │
-│   ├── renderSlf4j(compiled, args) -> String                  │
-│   ├── renderNamed(compiled, namedArgs) -> String             │
+│   ├── renderSimple(compiled, args) -> String                 │
+│   ├── renderNamedMap(compiled, namedArgs) -> String          │
 │   ├── renderNamedBean(compiled, bean) -> String  # 反射      │
 │   ├── ReflectCache (getter方法缓存)                           │
 ├─────────────────────────────────────────────────────────────┤
 │   MsgTemplateBuilder (统一Builder入口)                        │
-│   ├── slf4j() -> Slf4jBuilder                                │
+│   ├── simple() -> SimpleBuilder                              │
 │   ├── named() -> NamedBuilder                                │
 ├─────────────────────────────────────────────────────────────┤
 │   MsgTemplateLoader (加载器接口)                              │
@@ -92,48 +100,106 @@ cn.itcraft.jmsg
 
 ## 3. 核心类设计
 
-### 3.1 MsgTemplate接口
+### 3.1 MsgTemplateConfig - 全局配置类
 
-定义统一接口，不继承MultiLangDyEnum（因双实现类需分离）。
+全局配置，可设置默认Locale、反射缓存容量等。
 
 ```java
-public interface MsgTemplate extends DyEnum {
+public final class MsgTemplateConfig {
     
-    String render(Locale locale, Object... args);
+    private static volatile Locale defaultLocale = Locale.getDefault();
     
-    Locale getDefaultLocale();
+    private static volatile int reflectCacheMaxSize = 1024;
     
-    Style getStyle();
+    private static volatile boolean reflectCacheEnabled = true;
     
-    enum Style {
-        SLF4J,   // {} 风格
-        NAMED    // {name} 风格
+    private MsgTemplateConfig() {}
+    
+    public static Locale getDefaultLocale() {
+        return defaultLocale;
+    }
+    
+    public static void setDefaultLocale(Locale locale) {
+        if (locale != null) {
+            defaultLocale = locale;
+        }
+    }
+    
+    public static void setDefaultLocale(String localeCode) {
+        if (localeCode != null) {
+            defaultLocale = LocaleHelper.parse(localeCode);
+        }
+    }
+    
+    public static int getReflectCacheMaxSize() {
+        return reflectCacheMaxSize;
+    }
+    
+    public static void setReflectCacheMaxSize(int maxSize) {
+        reflectCacheMaxSize = maxSize > 0 ? maxSize : 1024;
+        ReflectCache.setMaxSize(reflectCacheMaxSize);
+    }
+    
+    public static boolean isReflectCacheEnabled() {
+        return reflectCacheEnabled;
+    }
+    
+    public static void setReflectCacheEnabled(boolean enabled) {
+        reflectCacheEnabled = enabled;
+    }
+    
+    public static void reset() {
+        defaultLocale = Locale.getDefault();
+        reflectCacheMaxSize = 1024;
+        reflectCacheEnabled = true;
+        ReflectCache.clear();
     }
 }
 ```
 
-### 3.2 Slf4jMsgTemplate
+### 3.2 MsgTemplate接口
+
+定义统一接口，render方法支持指定Locale和使用默认Locale。
+
+```java
+public interface MsgTemplate extends DyEnum {
+    
+    Locale getLocale();
+    
+    MsgTemplate.Style getStyle();
+    
+    String render(Locale locale, Object... args);
+    
+    String render(Object... args);
+    
+    enum Style {
+        SIMPLE,   // {} 风格（原名SLF4J）
+        NAMED     // {name} 风格
+    }
+}
+```
+
+### 3.3 SimpleMsgTemplate
 
 {} 风格实现，专一处理位置参数。
 
 ```java
-public class Slf4jMsgTemplate implements MsgTemplate {
+public class SimpleMsgTemplate implements MsgTemplate {
     
     private static final long serialVersionUID = 1L;
     
     private final String code;
     private final String name;
+    private final String description;
     private final int order;
-    private final Locale defaultLocale;
     private final Map<String, CompiledTemplate> compiledTemplates;
     
-    public Slf4jMsgTemplate(String code, String name, int order,
-                            Locale defaultLocale,
-                            Map<String, CompiledTemplate> compiledTemplates) {
+    public SimpleMsgTemplate(String code, String name, String description, int order,
+                             Map<String, CompiledTemplate> compiledTemplates) {
         this.code = code;
         this.name = name;
+        this.description = description != null ? description : "";
         this.order = order;
-        this.defaultLocale = defaultLocale != null ? defaultLocale : Locale.CHINA;
         this.compiledTemplates = compiledTemplates;
     }
     
@@ -144,43 +210,43 @@ public class Slf4jMsgTemplate implements MsgTemplate {
     public String getName() { return name; }
     
     @Override
-    public String getDescription() { return ""; }
+    public String getDescription() { return description; }
     
     @Override
     public int getOrder() { return order; }
     
     @Override
-    public Locale getDefaultLocale() { return defaultLocale; }
+    public Locale getLocale() {
+        return MsgTemplateConfig.getDefaultLocale();
+    }
     
     @Override
-    public MsgTemplate.Style getStyle() { return MsgTemplate.Style.SLF4J; }
+    public MsgTemplate.Style getStyle() { return MsgTemplate.Style.SIMPLE; }
     
     @Override
     public String render(Locale locale, Object... args) {
         CompiledTemplate compiled = getCompiled(locale);
-        return TemplateRenderer.renderSlf4j(compiled, args);
+        return TemplateRenderer.renderSimple(compiled, args);
+    }
+    
+    @Override
+    public String render(Object... args) {
+        return render(MsgTemplateConfig.getDefaultLocale(), args);
     }
     
     public CompiledTemplate getCompiled(Locale locale) {
         return compiledTemplates.getOrDefault(
             locale.getLanguage(),
-            compiledTemplates.getOrDefault(defaultLocale.getLanguage(), CompiledTemplate.EMPTY)
+            compiledTemplates.getOrDefault(MsgTemplateConfig.getDefaultLocale().getLanguage(), 
+                CompiledTemplate.EMPTY)
         );
-    }
-    
-    public String renderZh(Object... args) {
-        return render(Locale.CHINA, args);
-    }
-    
-    public String renderEn(Object... args) {
-        return render(Locale.US, args);
     }
     
     public Set<String> getSupportedLocales() {
         return compiledTemplates.keySet();
     }
     
-    public static Slf4jMsgTemplate fromValueString(String code, String valueString) {
+    public static SimpleMsgTemplate fromValueString(String code, String valueString) {
         String[] parts = valueString.split("\\|", -1);
         if (parts.length < 4) {
             throw new IllegalArgumentException(
@@ -192,18 +258,18 @@ public class Slf4jMsgTemplate implements MsgTemplate {
         int order = parts.length >= 5 ? Integer.parseInt(parts[4].trim()) : 0;
         
         Map<String, CompiledTemplate> compiled = new HashMap<>();
-        compiled.put("zh", TemplateCompiler.compileSlf4j(parts[2].trim()));
-        compiled.put("en", TemplateCompiler.compileSlf4j(parts[3].trim()));
+        compiled.put("zh", TemplateCompiler.compileSimple(parts[2].trim()));
+        compiled.put("en", TemplateCompiler.compileSimple(parts[3].trim()));
         
         String displayName = nameZh.isEmpty() ? nameEn : 
                              nameEn.isEmpty() ? nameZh : nameZh + "/" + nameEn;
         
-        return new Slf4jMsgTemplate(code, displayName, order, Locale.CHINA, compiled);
+        return new SimpleMsgTemplate(code, displayName, "", order, compiled);
     }
 }
 ```
 
-### 3.3 NamedMsgTemplate
+### 3.4 NamedMsgTemplate
 
 {name} 风格实现，专一处理命名参数，支持Map和Bean。
 
@@ -214,17 +280,16 @@ public class NamedMsgTemplate implements MsgTemplate {
     
     private final String code;
     private final String name;
+    private final String description;
     private final int order;
-    private final Locale defaultLocale;
     private final Map<String, CompiledTemplate> compiledTemplates;
     
-    public NamedMsgTemplate(String code, String name, int order,
-                            Locale defaultLocale,
+    public NamedMsgTemplate(String code, String name, String description, int order,
                             Map<String, CompiledTemplate> compiledTemplates) {
         this.code = code;
         this.name = name;
+        this.description = description != null ? description : "";
         this.order = order;
-        this.defaultLocale = defaultLocale != null ? defaultLocale : Locale.CHINA;
         this.compiledTemplates = compiledTemplates;
     }
     
@@ -235,13 +300,15 @@ public class NamedMsgTemplate implements MsgTemplate {
     public String getName() { return name; }
     
     @Override
-    public String getDescription() { return ""; }
+    public String getDescription() { return description; }
     
     @Override
     public int getOrder() { return order; }
     
     @Override
-    public Locale getDefaultLocale() { return defaultLocale; }
+    public Locale getLocale() {
+        return MsgTemplateConfig.getDefaultLocale();
+    }
     
     @Override
     public MsgTemplate.Style getStyle() { return MsgTemplate.Style.NAMED; }
@@ -261,6 +328,11 @@ public class NamedMsgTemplate implements MsgTemplate {
         }
     }
     
+    @Override
+    public String render(Object... args) {
+        return render(MsgTemplateConfig.getDefaultLocale(), args);
+    }
+    
     public String renderMap(Locale locale, Map<String, Object> namedArgs) {
         CompiledTemplate compiled = getCompiled(locale);
         return TemplateRenderer.renderNamedMap(compiled, namedArgs);
@@ -274,16 +346,9 @@ public class NamedMsgTemplate implements MsgTemplate {
     public CompiledTemplate getCompiled(Locale locale) {
         return compiledTemplates.getOrDefault(
             locale.getLanguage(),
-            compiledTemplates.getOrDefault(defaultLocale.getLanguage(), CompiledTemplate.EMPTY)
+            compiledTemplates.getOrDefault(MsgTemplateConfig.getDefaultLocale().getLanguage(), 
+                CompiledTemplate.EMPTY)
         );
-    }
-    
-    public String renderZh(Object... args) {
-        return render(Locale.CHINA, args);
-    }
-    
-    public String renderEn(Object... args) {
-        return render(Locale.US, args);
     }
     
     public Set<String> getSupportedLocales() {
@@ -308,14 +373,14 @@ public class NamedMsgTemplate implements MsgTemplate {
         String displayName = nameZh.isEmpty() ? nameEn : 
                              nameEn.isEmpty() ? nameZh : nameZh + "/" + nameEn;
         
-        return new NamedMsgTemplate(code, displayName, order, Locale.CHINA, compiled);
+        return new NamedMsgTemplate(code, displayName, "", order, compiled);
     }
 }
 ```
 
-### 3.4 CompiledTemplate
+### 3.5 CompiledTemplate
 
-预编译模板结构，SLF4J和Named共用。
+预编译模板结构，Simple和Named共用。
 
 ```java
 public class CompiledTemplate implements Serializable {
@@ -350,9 +415,9 @@ public class CompiledTemplate implements Serializable {
 }
 ```
 
-### 3.5 TemplateCompiler
+### 3.6 TemplateCompiler
 
-模板预编译器。
+模板预编译器，方法名从compileSlf4j改为compileSimple。
 
 ```java
 public final class TemplateCompiler {
@@ -360,7 +425,7 @@ public final class TemplateCompiler {
     private static final char PLACEHOLDER_START = '{';
     private static final char PLACEHOLDER_END = '}';
     
-    public static CompiledTemplate compileSlf4j(String template) {
+    public static CompiledTemplate compileSimple(String template) {
         if (template == null || template.isEmpty()) {
             return CompiledTemplate.EMPTY;
         }
@@ -453,14 +518,14 @@ public final class TemplateCompiler {
 }
 ```
 
-### 3.6 TemplateRenderer + ReflectCache
+### 3.7 TemplateRenderer + ReflectCache
 
-渲染执行器，包含反射缓存支持。
+渲染执行器，包含反射缓存支持，方法名从renderSlf4j改为renderSimple。
 
 ```java
 public final class TemplateRenderer {
     
-    public static String renderSlf4j(CompiledTemplate compiled, Object[] args) {
+    public static String renderSimple(CompiledTemplate compiled, Object[] args) {
         if (!compiled.hasParams()) {
             return compiled.getFragments()[0];
         }
@@ -523,6 +588,10 @@ public final class TemplateRenderer {
             return renderOriginal(compiled);
         }
         
+        if (!MsgTemplateConfig.isReflectCacheEnabled()) {
+            return renderNamedBeanNoCache(compiled, bean);
+        }
+        
         String[] fragments = compiled.getFragments();
         String[] paramNames = compiled.getParamNames();
         int paramCount = compiled.getParamCount();
@@ -534,6 +603,29 @@ public final class TemplateRenderer {
             if (i < paramCount) {
                 String paramName = paramNames[i];
                 Object value = ReflectCache.getProperty(bean, paramName);
+                if (value != null) {
+                    result.append(value);
+                } else {
+                    result.append('{').append(paramName).append('}');
+                }
+            }
+        }
+        
+        return result.toString();
+    }
+    
+    private static String renderNamedBeanNoCache(CompiledTemplate compiled, Object bean) {
+        String[] fragments = compiled.getFragments();
+        String[] paramNames = compiled.getParamNames();
+        int paramCount = compiled.getParamCount();
+        
+        StringBuilder result = new StringBuilder();
+        
+        for (int i = 0; i < fragments.length; i++) {
+            result.append(fragments[i]);
+            if (i < paramCount) {
+                String paramName = paramNames[i];
+                Object value = ReflectCache.getPropertyNoCache(bean, paramName);
                 if (value != null) {
                     result.append(value);
                 } else {
@@ -591,9 +683,9 @@ public final class TemplateRenderer {
 }
 ```
 
-### 3.7 ReflectCache
+### 3.8 ReflectCache
 
-反射缓存，缓存getter方法查找结果，支持容量控制。
+反射缓存，支持缓存开关和容量控制。
 
 ```java
 public final class ReflectCache {
@@ -609,6 +701,10 @@ public final class ReflectCache {
         maxSize = size > 0 ? size : DEFAULT_MAX_SIZE;
     }
     
+    public static int getMaxSize() {
+        return maxSize;
+    }
+    
     public static Object getProperty(Object bean, String propertyName) {
         if (bean == null || propertyName == null || propertyName.isEmpty()) {
             return null;
@@ -616,6 +712,24 @@ public final class ReflectCache {
         
         Class<?> clazz = bean.getClass();
         Method getter = getGetterMethod(clazz, propertyName);
+        
+        if (getter == null) {
+            return null;
+        }
+        
+        try {
+            return getter.invoke(bean);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+    
+    public static Object getPropertyNoCache(Object bean, String propertyName) {
+        if (bean == null || propertyName == null || propertyName.isEmpty()) {
+            return null;
+        }
+        
+        Method getter = findGetterMethod(bean.getClass(), propertyName);
         
         if (getter == null) {
             return null;
@@ -716,65 +830,6 @@ public final class ReflectCache {
 }
 ```
 
-**可选Guava Cache版本**（用户可自行替换）：
-
-```java
-public final class ReflectCacheGuava {
-    
-    private static final Cache<Class<?>, Map<String, Method>> cache = 
-        CacheBuilder.newBuilder()
-            .maximumSize(1024)
-            .expireAfterAccess(1, TimeUnit.HOURS)
-            .build();
-    
-    public static Object getProperty(Object bean, String propertyName) {
-        if (bean == null) return null;
-        
-        try {
-            Map<String, Method> classCache = cache.get(bean.getClass(), () -> buildClassCache(bean.getClass()));
-            Method getter = classCache.get(propertyName);
-            if (getter != null) {
-                return getter.invoke(bean);
-            }
-        } catch (Exception e) {
-            return null;
-        }
-        return null;
-    }
-    
-    private static Map<String, Method> buildClassCache(Class<?> clazz) {
-        Map<String, Method> map = new HashMap<>();
-        for (Method method : clazz.getMethods()) {
-            if (isGetter(method)) {
-                String name = extractPropertyName(method);
-                if (name != null) {
-                    map.put(name, method);
-                }
-            }
-        }
-        return map;
-    }
-    
-    private static boolean isGetter(Method method) {
-        String methodName = method.getName();
-        return method.getParameterCount() == 0 && 
-               method.getReturnType() != void.class &&
-               (methodName.startsWith("get") || methodName.startsWith("is"));
-    }
-    
-    private static String extractPropertyName(Method method) {
-        String methodName = method.getName();
-        if (methodName.startsWith("get") && methodName.length() > 3) {
-            return Character.toLowerCase(methodName.charAt(3)) + methodName.substring(4);
-        }
-        if (methodName.startsWith("is") && methodName.length() > 2) {
-            return Character.toLowerCase(methodName.charAt(2)) + methodName.substring(3);
-        }
-        return null;
-    }
-}
-```
-
 ---
 
 ## 4. Builder设计
@@ -785,7 +840,7 @@ public final class ReflectCacheGuava {
 public class MsgTemplateBuilder {
     
     private String code;
-    private Locale locale = Locale.CHINA;
+    private Locale locale;
     
     public MsgTemplateBuilder code(String code) {
         this.code = code;
@@ -802,8 +857,8 @@ public class MsgTemplateBuilder {
         return this;
     }
     
-    public Slf4jBuilder slf4j() {
-        return new Slf4jBuilder(code, locale);
+    public SimpleBuilder simple() {
+        return new SimpleBuilder(code, locale);
     }
     
     public NamedBuilder named() {
@@ -816,21 +871,23 @@ public class MsgTemplateBuilder {
 }
 ```
 
-### 4.2 Slf4jBuilder
+### 4.2 SimpleBuilder
+
+{} 风格Builder，render方法支持指定Locale和使用默认Locale。
 
 ```java
-public class Slf4jBuilder {
+public class SimpleBuilder {
     
     private final String code;
     private final Locale locale;
     private Object[] args;
     
-    Slf4jBuilder(String code, Locale locale) {
+    SimpleBuilder(String code, Locale locale) {
         this.code = code;
         this.locale = locale;
     }
     
-    public Slf4jBuilder args(Object... args) {
+    public SimpleBuilder args(Object... args) {
         this.args = args;
         return this;
     }
@@ -841,23 +898,25 @@ public class Slf4jBuilder {
         }
         
         MsgTemplate template = findTemplate(code);
-        if (template.getStyle() != MsgTemplate.Style.SLF4J) {
-            throw new IllegalArgumentException("Template is not SLF4J style: " + code);
+        if (template.getStyle() != MsgTemplate.Style.SIMPLE) {
+            throw new IllegalArgumentException("Template is not SIMPLE style: " + code);
         }
         
+        Locale renderLocale = locale != null ? locale : MsgTemplateConfig.getDefaultLocale();
+        return template.render(renderLocale, args);
+    }
+    
+    public String render(Locale locale) {
+        if (code == null) {
+            throw new IllegalStateException("Code is required");
+        }
+        
+        MsgTemplate template = findTemplate(code);
         return template.render(locale, args);
     }
     
-    public String renderZh() {
-        return new Slf4jBuilder(code, Locale.CHINA).args(args).render();
-    }
-    
-    public String renderEn() {
-        return new Slf4jBuilder(code, Locale.US).args(args).render();
-    }
-    
     private MsgTemplate findTemplate(String code) {
-        MsgTemplate template = EnumRegistry.valueOf(Slf4jMsgTemplate.class, code)
+        MsgTemplate template = EnumRegistry.valueOf(SimpleMsgTemplate.class, code)
             .orElse(null);
         if (template == null) {
             template = EnumRegistry.valueOf(MsgTemplate.class, code)
@@ -869,6 +928,8 @@ public class Slf4jBuilder {
 ```
 
 ### 4.3 NamedBuilder
+
+{name} 风格Builder，支持Map参数和Bean参数。
 
 ```java
 public class NamedBuilder {
@@ -914,25 +975,27 @@ public class NamedBuilder {
             throw new IllegalArgumentException("Template is not NAMED style: " + code);
         }
         
+        Locale renderLocale = locale != null ? locale : MsgTemplateConfig.getDefaultLocale();
+        
+        if (bean != null) {
+            return template.render(renderLocale, bean);
+        } else {
+            return template.render(renderLocale, namedArgs);
+        }
+    }
+    
+    public String render(Locale locale) {
+        if (code == null) {
+            throw new IllegalStateException("Code is required");
+        }
+        
+        MsgTemplate template = findTemplate(code);
+        
         if (bean != null) {
             return template.render(locale, bean);
         } else {
             return template.render(locale, namedArgs);
         }
-    }
-    
-    public String renderZh() {
-        NamedBuilder zhBuilder = new NamedBuilder(code, Locale.CHINA);
-        if (bean != null) zhBuilder.bean = bean;
-        else zhBuilder.namedArgs = namedArgs;
-        return zhBuilder.render();
-    }
-    
-    public String renderEn() {
-        NamedBuilder enBuilder = new NamedBuilder(code, Locale.US);
-        if (bean != null) enBuilder.bean = bean;
-        else enBuilder.namedArgs = namedArgs;
-        return enBuilder.render();
     }
     
     private MsgTemplate findTemplate(String code) {
@@ -966,7 +1029,7 @@ public interface MsgTemplateLoader extends DyEnumsLoader<MsgTemplate> {
 
 ### 5.2 FileMsgTemplateLoader
 
-文件加载器，支持SLF4J和Named分离加载。
+文件加载器，支持Simple和Named分离加载。
 
 ```java
 public class FileMsgTemplateLoader implements MsgTemplateLoader {
@@ -980,11 +1043,11 @@ public class FileMsgTemplateLoader implements MsgTemplateLoader {
     }
     
     public FileMsgTemplateLoader(String filePath) {
-        this(filePath, MsgTemplate.Style.SLF4J);
+        this(filePath, MsgTemplate.Style.SIMPLE);
     }
     
-    public static FileMsgTemplateLoader forSlf4j(String filePath) {
-        return new FileMsgTemplateLoader(filePath, MsgTemplate.Style.SLF4J);
+    public static FileMsgTemplateLoader forSimple(String filePath) {
+        return new FileMsgTemplateLoader(filePath, MsgTemplate.Style.SIMPLE);
     }
     
     public static FileMsgTemplateLoader forNamed(String filePath) {
@@ -1024,11 +1087,11 @@ public class FileMsgTemplateLoader implements MsgTemplateLoader {
     private BiFunction<String, String, MsgTemplate> getFactory() {
         return style == MsgTemplate.Style.NAMED 
             ? NamedMsgTemplate::fromValueString 
-            : Slf4jMsgTemplate::fromValueString;
+            : SimpleMsgTemplate::fromValueString;
     }
     
     private Class<?> getRegisterClass() {
-        return style == MsgTemplate.Style.NAMED ? NamedMsgTemplate.class : Slf4jMsgTemplate.class;
+        return style == MsgTemplate.Style.NAMED ? NamedMsgTemplate.class : SimpleMsgTemplate.class;
     }
     
     private InputStream getResourceAsStream(String path) {
@@ -1077,11 +1140,11 @@ public class PropMsgTemplateLoader implements MsgTemplateLoader {
     private BiFunction<String, String, MsgTemplate> getFactory() {
         return style == MsgTemplate.Style.NAMED 
             ? NamedMsgTemplate::fromValueString 
-            : Slf4jMsgTemplate::fromValueString;
+            : SimpleMsgTemplate::fromValueString;
     }
     
     private Class<?> getRegisterClass() {
-        return style == MsgTemplate.Style.NAMED ? NamedMsgTemplate.class : Slf4jMsgTemplate.class;
+        return style == MsgTemplate.Style.NAMED ? NamedMsgTemplate.class : SimpleMsgTemplate.class;
     }
 }
 ```
@@ -1090,10 +1153,10 @@ public class PropMsgTemplateLoader implements MsgTemplateLoader {
 
 ## 6. 配置文件格式
 
-### 6.1 SLF4J风格配置
+### 6.1 Simple风格配置
 
 ```properties
-# msg_templates_slf4j.properties
+# msg_templates_simple.properties
 # 格式：name_zh|name_en|template_zh|template_en|order
 
 SYS_ERR_001=系统错误|System error|系统内部错误:{}|Internal system error:{}|1
@@ -1116,62 +1179,109 @@ LOG_001=登录日志|Login log|用户{userId}于{time}登录成功|User {userId}
 
 ## 7. 使用示例
 
-### 7.1 初始化
+### 7.1 全局配置
+
+```java
+// 设置默认Locale（全局）
+MsgTemplateConfig.setDefaultLocale(Locale.CHINA);
+
+// 或通过字符串设置
+MsgTemplateConfig.setDefaultLocale("zh_CN");
+
+// 设置反射缓存容量
+MsgTemplateConfig.setReflectCacheMaxSize(2048);
+
+// 禁用反射缓存
+MsgTemplateConfig.setReflectCacheEnabled(false);
+
+// 重置为默认值
+MsgTemplateConfig.reset();
+```
+
+### 7.2 初始化加载
 
 ```java
 public class AppInitializer {
     public void init() {
-        FileMsgTemplateLoader.forSlf4j("msg_templates_slf4j.properties")
+        // 设置默认Locale
+        MsgTemplateConfig.setDefaultLocale(Locale.CHINA);
+        
+        // 加载Simple风格模板
+        FileMsgTemplateLoader.forSimple("msg_templates_simple.properties")
             .load(MsgTemplate.class, null);
         
+        // 加载Named风格模板
         FileMsgTemplateLoader.forNamed("msg_templates_named.properties")
             .load(MsgTemplate.class, null);
     }
 }
 ```
 
-### 7.2 SLF4J风格使用
+### 7.3 Simple风格使用
 
 ```java
+// 使用默认Locale
+MsgTemplate template = EnumRegistry.valueOf(SimpleMsgTemplate.class, "SYS_ERR_001")
+    .orElseThrow();
+String msg = template.render("数据库连接超时");
+// 输出：系统内部错误：数据库连接超时（使用默认Locale=CHINA）
+
+// 指定Locale
+String msg = template.render(Locale.US, "Database timeout");
+// 输出：Internal system error: Database timeout
+
+// Builder方式
 String msg = MsgTemplateBuilder.create()
-    .code("SYS_ERR_001")
-    .locale(Locale.CHINA)
-    .slf4j()
-    .args("数据库连接超时")
+    .code("LOG_001")
+    .simple()
+    .args("admin", "2024-04-17 10:30:00")
     .render();
-// 输出：系统内部错误：数据库连接超时
+// 使用默认Locale
 
 String msg = MsgTemplateBuilder.create()
     .code("LOG_001")
-    .slf4j()
+    .locale(Locale.US)
+    .simple()
     .args("admin", "2024-04-17 10:30:00")
-    .renderZh();
-// 输出：用户admin于2024-04-17 10:30:00登录成功
+    .render();
+// 使用指定的Locale.US
 ```
 
-### 7.3 Named风格使用（Map参数）
+### 7.4 Named风格使用（Map参数）
 
 ```java
+// 使用默认Locale
 Map<String, Object> args = new HashMap<>();
 args.put("userId", "admin");
 args.put("time", "2024-04-17 10:30:00");
 
-String msg = MsgTemplateBuilder.create()
-    .code("LOG_001")
-    .named()
-    .args(args)
-    .render();
+MsgTemplate template = EnumRegistry.valueOf(NamedMsgTemplate.class, "LOG_001")
+    .orElseThrow();
+String msg = template.render(args);
 // 输出：用户admin于2024-04-17 10:30:00登录成功
 
+// 指定Locale
+String msg = template.render(Locale.US, args);
+// 输出：User admin logged in at 2024-04-17 10:30:00
+
+// Builder方式
 String msg = MsgTemplateBuilder.create()
     .code("SYS_ERR_002")
     .named()
     .arg("paramName", "email")
-    .renderEn();
+    .render();
+// 使用默认Locale
+
+String msg = MsgTemplateBuilder.create()
+    .code("SYS_ERR_002")
+    .locale(Locale.US)
+    .named()
+    .arg("paramName", "email")
+    .render();
 // 输出：Parameter email validation failed
 ```
 
-### 7.4 Named风格使用（Bean参数）
+### 7.5 Named风格使用（Bean参数）
 
 ```java
 public class LoginEvent {
@@ -1186,54 +1296,81 @@ LoginEvent event = new LoginEvent();
 event.userId = "admin";
 event.time = "2024-04-17 10:30:00";
 
+// 使用默认Locale
+MsgTemplate template = EnumRegistry.valueOf(NamedMsgTemplate.class, "LOG_001")
+    .orElseThrow();
+String msg = template.render(event);
+// 输出：用户admin于2024-04-17 10:30:00登录成功
+
+// 指定Locale
+String msg = template.render(Locale.US, event);
+// 输出：User admin logged in at 2024-04-17 10:30:00
+
+// Builder方式
 String msg = MsgTemplateBuilder.create()
     .code("LOG_001")
-    .locale(Locale.CHINA)
     .named()
     .bean(event)
     .render();
-// 输出：用户admin于2024-04-17 10:30:00登录成功
+// 使用默认Locale
 
-// 反射缓存自动生效，后续调用无需重新查找getter方法
-ReflectCache.setProperty(bean, "userId");  // 首次查找并缓存
-ReflectCache.getProperty(bean, "userId");  // 直接从缓存获取
+String msg = MsgTemplateBuilder.create()
+    .code("LOG_001")
+    .locale(Locale.US)
+    .named()
+    .bean(event)
+    .render();
+// 使用Locale.US
 ```
 
 ---
 
-## 8. 反射缓存说明
+## 8. Locale配置说明
 
-### 8.1 缓存结构
+### 8.1 默认Locale来源
 
+默认Locale取值顺序：
+1. `MsgTemplateConfig.getDefaultLocale()` - 全局配置（用户设置）
+2. `Locale.getDefault()` - JVM默认Locale
+
+### 8.2 设置方式
+
+```java
+// 方式1：全局配置（推荐）
+MsgTemplateConfig.setDefaultLocale(Locale.CHINA);
+MsgTemplateConfig.setDefaultLocale("zh_CN");
+MsgTemplateConfig.setDefaultLocale("en");
+
+// 方式2：Builder指定（单次调用）
+MsgTemplateBuilder.create()
+    .locale(Locale.US)
+    .simple()
+    .args(...)
+    .render();
+
+// 方式3：render方法指定（单次调用）
+template.render(Locale.US, args);
+template.render(args);  // 使用默认Locale
 ```
-ReflectCache
-├── cache: ConcurrentMap<Class<?>, ConcurrentMap<String, Method>>
-│   ├── User.class -> { "userId": Method(getUserId), "name": Method(getName) }
-│   ├── Order.class -> { "orderId": Method(getOrderId), "amount": Method(getAmount) }
-│   └── ... (最多 maxSize 个类)
+
+### 8.3 Locale回退机制
+
+当指定的Locale模板不存在时，回退顺序：
+1. 指定Locale（如 Locale.CHINA -> "zh"）
+2. 默认Locale（如 MsgTemplateConfig.getDefaultLocale() -> "zh"）
+3. 英文Locale（"en"）作为兜底
+
+```java
+CompiledTemplate getCompiled(Locale locale) {
+    return compiledTemplates.getOrDefault(
+        locale.getLanguage(),
+        compiledTemplates.getOrDefault(
+            MsgTemplateConfig.getDefaultLocale().getLanguage(), 
+            compiledTemplates.getOrDefault("en", CompiledTemplate.EMPTY)
+        )
+    );
+}
 ```
-
-### 8.2 容量控制
-
-- 默认最大容量：1024个类
-- 超出时淘汰最早的类缓存（FIFO）
-- 可通过 `ReflectCache.setMaxSize(int)` 调整
-- 可通过 `ReflectCache.clear()` 清空
-
-### 8.3 getter查找策略
-
-1. `get{Name}` 方法（如 getUserId）
-2. `is{Name}` 方法（如 isActive，仅boolean）
-3. `{name}` 方法（如 userId，非标准）
-4. 查找父类
-
-### 8.4 性能对比
-
-| 操作 | 无缓存 | 有缓存 |
-|------|--------|--------|
-| 首次调用 | O(methods.length) 查找 | O(methods.length) 查找 + 缓存 |
-| 后续调用 | O(methods.length) 查找 | O(1) Map.get |
-| 100K次调用 | ~200ms | ~5ms |
 
 ---
 
@@ -1243,13 +1380,14 @@ ReflectCache
 
 | 测试类 | 测试范围 |
 |--------|----------|
+| MsgTemplateConfigTest | 全局配置：默认Locale、反射缓存设置 |
 | CompiledTemplateTest | 预编译结构 |
 | TemplateCompilerTest | {}解析、{name}解析 |
 | TemplateRendererTest | 位置填充、Map填充、Bean填充 |
 | ReflectCacheTest | getter查找、缓存命中、容量控制 |
-| Slf4jMsgTemplateTest | {}风格模板 |
+| SimpleMsgTemplateTest | {}风格模板、render方法 |
 | NamedMsgTemplateTest | {name}风格模板、Map/Bean参数 |
-| Slf4jBuilderTest | {}风格Builder |
+| SimpleBuilderTest | {}风格Builder |
 | NamedBuilderTest | {name}风格Builder |
 | FileMsgTemplateLoaderTest | 文件加载、风格分离 |
 
@@ -1258,6 +1396,9 @@ ReflectCache
 ```java
 @Test
 public void testReflectCachePerformance() {
+    MsgTemplateConfig.setReflectCacheEnabled(true);
+    MsgTemplateConfig.setReflectCacheMaxSize(1024);
+    
     LoginEvent event = new LoginEvent();
     event.userId = "admin";
     event.time = "2024-04-17";
@@ -1265,8 +1406,8 @@ public void testReflectCachePerformance() {
     CompiledTemplate compiled = TemplateCompiler.compileNamed(
         "用户{userId}于{time}登录成功");
     
-    long startNoCache = System.nanoTime();
     ReflectCache.clear();
+    long startNoCache = System.nanoTime();
     for (int i = 0; i < 10000; i++) {
         TemplateRenderer.renderNamedBean(compiled, event);
     }
@@ -1280,6 +1421,20 @@ public void testReflectCachePerformance() {
     
     System.out.println("No cache (10K): " + elapsedNoCache / 1_000_000 + "ms");
     System.out.println("With cache (100K): " + elapsedWithCache / 1_000_000 + "ms");
+}
+
+@Test
+public void testDefaultLocale() {
+    MsgTemplateConfig.setDefaultLocale(Locale.CHINA);
+    
+    SimpleMsgTemplate template = SimpleMsgTemplate.fromValueString(
+        "TEST", "测试|Test|默认中文:{}|Default English:{}|1");
+    
+    String msgDefault = template.render("value");
+    assertEquals("默认中文:value", msgDefault);
+    
+    String msgEn = template.render(Locale.US, "value");
+    assertEquals("Default English:value", msgEn);
 }
 ```
 
@@ -1302,10 +1457,16 @@ public void testReflectCachePerformance() {
 | getter查找 | 每次反射查找 | 首次查找后缓存 |
 | Bean属性读取 | O(methods.length) | O(1) |
 
-### 10.3 线程安全
+### 10.3 默认Locale优化
+
+- 全局配置避免每次调用都传入Locale参数
+- Builder可选指定Locale，灵活兼顾便捷
+
+### 10.4 线程安全
 
 - CompiledTemplate不可变
 - MsgTemplate实现类不可变
+- MsgTemplateConfig使用volatile
 - ReflectCache基于ConcurrentHashMap
 - EnumRegistry基于ConcurrentHashMap
 - 无锁竞争
@@ -1331,7 +1492,7 @@ public void testReflectCachePerformance() {
 
 ### 11.3 预定义模板子类
 
-继承Slf4jMsgTemplate或NamedMsgTemplate：
+继承SimpleMsgTemplate或NamedMsgTemplate：
 - ErrorCode（错误码）
 - LogTemplate（日志模板）
 - NotificationTemplate（通知模板）
