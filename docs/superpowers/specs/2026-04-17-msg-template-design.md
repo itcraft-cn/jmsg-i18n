@@ -7,14 +7,15 @@
 
 ### 1.2 核心需求
 - 支持参数化模板（占位符替换）
-- 支持双模板风格：{} (SLF4J) 和 {name} (命名参数)
+- 支持双模板风格：{} (SLF4J) 和 {name} (命名参数)，分离实现
 - 通用消息模板设计，可扩展错误码、日志、通知等
 - 加载器多态设计，默认文件模式，其他数据源由用户自行扩展
 - 提供静态方法+Builder双API风格
 - 预编译模板，高性能渲染
+- Named风格支持Map参数和Bean参数（反射），缓存getter方法
 
 ### 1.3 选定方案
-方案C：MsgTemplate继承MultiLangDyEnum + 预编译模板引擎 + 双模板存储
+方案C优化：MsgTemplate接口 + 双实现类 + 预编译模板引擎 + 反射缓存
 
 ---
 
@@ -25,18 +26,23 @@
 ```
 cn.itcraft.jmsg
 ├── core
-│   ├── MsgTemplate.java          # 核心类，继承MultiLangDyEnum
+│   ├── MsgTemplate.java          # 接口定义
+│   ├── Slf4jMsgTemplate.java     # {}风格实现
+│   ├── NamedMsgTemplate.java     # {name}风格实现
 │   ├── CompiledTemplate.java     # 预编译模板结构
 │   ├── TemplateCompiler.java     # 模板预编译器
-│   └── TemplateRenderer.java     # 渲染执行器
+│   └── TemplateRenderer.java     # 渲染执行器（含反射缓存）
 ├── loader
-│   ├── MsgTemplateLoader.java    # 加载器接口（继承DyEnumsLoader）
+│   ├── MsgTemplateLoader.java    # 加载器接口
 │   ├── FileMsgTemplateLoader.java# 文件加载器（默认）
 │   └── PropMsgTemplateLoader.java# Properties加载器
 ├── builder
-│   └── MsgTemplateBuilder.java   # Builder模式构建器
+│   ├── MsgTemplateBuilder.java   # Builder构建器（统一入口）
+│   ├── Slf4jBuilder.java         # {}风格Builder
+│   └── NamedBuilder.java         # {name}风格Builder
 └── util
-    └── LocaleHelper.java         # Locale辅助工具
+    ├── LocaleHelper.java         # Locale辅助工具
+    └── ReflectCache.java         # 反射缓存（可选Guava）
 ```
 
 ### 2.2 依赖关系
@@ -46,10 +52,11 @@ cn.itcraft.jmsg
 │                      应用层                                  │
 │   MsgTemplate.get() / MsgTemplate.builder().render()         │
 ├─────────────────────────────────────────────────────────────┤
-│   MsgTemplate (核心类，继承 MultiLangDyEnum)                  │
-│   ├── compiledSlf4j: Map<Locale, CompiledTemplate>           │
-│   ├── compiledNamed: Map<Locale, CompiledTemplate>           │
-│   ├── render(), renderNamed()                                │
+│   MsgTemplate (接口)                                          │
+│   ├── Slf4jMsgTemplate ({}风格实现)                           │
+│   │   └── compiled: Map<Locale, CompiledTemplate>            │
+│   ├── NamedMsgTemplate ({name}风格实现)                       │
+│   │   └── compiled: Map<Locale, CompiledTemplate>            │
 ├─────────────────────────────────────────────────────────────┤
 │   CompiledTemplate (预编译模板结构)                           │
 │   ├── fragments: String[]        文本片段                    │
@@ -61,15 +68,21 @@ cn.itcraft.jmsg
 │   ├── compileNamed(template) -> CompiledTemplate             │
 ├─────────────────────────────────────────────────────────────┤
 │   TemplateRenderer (渲染执行器)                              │
-│   ├── render(compiled, args) -> String                       │
+│   ├── renderSlf4j(compiled, args) -> String                  │
 │   ├── renderNamed(compiled, namedArgs) -> String             │
+│   ├── renderNamedBean(compiled, bean) -> String  # 反射      │
+│   ├── ReflectCache (getter方法缓存)                           │
+├─────────────────────────────────────────────────────────────┤
+│   MsgTemplateBuilder (统一Builder入口)                        │
+│   ├── slf4j() -> Slf4jBuilder                                │
+│   ├── named() -> NamedBuilder                                │
 ├─────────────────────────────────────────────────────────────┤
 │   MsgTemplateLoader (加载器接口)                              │
 │   ├── FileMsgTemplateLoader (默认)                           │
 │   ├── PropMsgTemplateLoader                                  │
 ├─────────────────────────────────────────────────────────────┤
 │   dyenums-core (基础依赖)                                     │
-│   ├── MultiLangDyEnum                                        │
+│   ├── DyEnum接口                                             │
 │   ├── EnumRegistry                                           │
 │   ├── DyEnumsLoader                                          │
 └─────────────────────────────────────────────────────────────┘
@@ -79,14 +92,238 @@ cn.itcraft.jmsg
 
 ## 3. 核心类设计
 
-### 3.1 CompiledTemplate - 预编译模板结构
+### 3.1 MsgTemplate接口
 
-核心数据结构，存储预编译后的模板信息。
+定义统一接口，不继承MultiLangDyEnum（因双实现类需分离）。
+
+```java
+public interface MsgTemplate extends DyEnum {
+    
+    String render(Locale locale, Object... args);
+    
+    Locale getDefaultLocale();
+    
+    Style getStyle();
+    
+    enum Style {
+        SLF4J,   // {} 风格
+        NAMED    // {name} 风格
+    }
+}
+```
+
+### 3.2 Slf4jMsgTemplate
+
+{} 风格实现，专一处理位置参数。
+
+```java
+public class Slf4jMsgTemplate implements MsgTemplate {
+    
+    private static final long serialVersionUID = 1L;
+    
+    private final String code;
+    private final String name;
+    private final int order;
+    private final Locale defaultLocale;
+    private final Map<String, CompiledTemplate> compiledTemplates;
+    
+    public Slf4jMsgTemplate(String code, String name, int order,
+                            Locale defaultLocale,
+                            Map<String, CompiledTemplate> compiledTemplates) {
+        this.code = code;
+        this.name = name;
+        this.order = order;
+        this.defaultLocale = defaultLocale != null ? defaultLocale : Locale.CHINA;
+        this.compiledTemplates = compiledTemplates;
+    }
+    
+    @Override
+    public String getCode() { return code; }
+    
+    @Override
+    public String getName() { return name; }
+    
+    @Override
+    public String getDescription() { return ""; }
+    
+    @Override
+    public int getOrder() { return order; }
+    
+    @Override
+    public Locale getDefaultLocale() { return defaultLocale; }
+    
+    @Override
+    public MsgTemplate.Style getStyle() { return MsgTemplate.Style.SLF4J; }
+    
+    @Override
+    public String render(Locale locale, Object... args) {
+        CompiledTemplate compiled = getCompiled(locale);
+        return TemplateRenderer.renderSlf4j(compiled, args);
+    }
+    
+    public CompiledTemplate getCompiled(Locale locale) {
+        return compiledTemplates.getOrDefault(
+            locale.getLanguage(),
+            compiledTemplates.getOrDefault(defaultLocale.getLanguage(), CompiledTemplate.EMPTY)
+        );
+    }
+    
+    public String renderZh(Object... args) {
+        return render(Locale.CHINA, args);
+    }
+    
+    public String renderEn(Object... args) {
+        return render(Locale.US, args);
+    }
+    
+    public Set<String> getSupportedLocales() {
+        return compiledTemplates.keySet();
+    }
+    
+    public static Slf4jMsgTemplate fromValueString(String code, String valueString) {
+        String[] parts = valueString.split("\\|", -1);
+        if (parts.length < 4) {
+            throw new IllegalArgumentException(
+                "Invalid format. Expected: name_zh|name_en|template_zh|template_en|order");
+        }
+        
+        String nameZh = parts[0].trim();
+        String nameEn = parts[1].trim();
+        int order = parts.length >= 5 ? Integer.parseInt(parts[4].trim()) : 0;
+        
+        Map<String, CompiledTemplate> compiled = new HashMap<>();
+        compiled.put("zh", TemplateCompiler.compileSlf4j(parts[2].trim()));
+        compiled.put("en", TemplateCompiler.compileSlf4j(parts[3].trim()));
+        
+        String displayName = nameZh.isEmpty() ? nameEn : 
+                             nameEn.isEmpty() ? nameZh : nameZh + "/" + nameEn;
+        
+        return new Slf4jMsgTemplate(code, displayName, order, Locale.CHINA, compiled);
+    }
+}
+```
+
+### 3.3 NamedMsgTemplate
+
+{name} 风格实现，专一处理命名参数，支持Map和Bean。
+
+```java
+public class NamedMsgTemplate implements MsgTemplate {
+    
+    private static final long serialVersionUID = 1L;
+    
+    private final String code;
+    private final String name;
+    private final int order;
+    private final Locale defaultLocale;
+    private final Map<String, CompiledTemplate> compiledTemplates;
+    
+    public NamedMsgTemplate(String code, String name, int order,
+                            Locale defaultLocale,
+                            Map<String, CompiledTemplate> compiledTemplates) {
+        this.code = code;
+        this.name = name;
+        this.order = order;
+        this.defaultLocale = defaultLocale != null ? defaultLocale : Locale.CHINA;
+        this.compiledTemplates = compiledTemplates;
+    }
+    
+    @Override
+    public String getCode() { return code; }
+    
+    @Override
+    public String getName() { return name; }
+    
+    @Override
+    public String getDescription() { return ""; }
+    
+    @Override
+    public int getOrder() { return order; }
+    
+    @Override
+    public Locale getDefaultLocale() { return defaultLocale; }
+    
+    @Override
+    public MsgTemplate.Style getStyle() { return MsgTemplate.Style.NAMED; }
+    
+    @Override
+    public String render(Locale locale, Object... args) {
+        if (args == null || args.length == 0) {
+            CompiledTemplate compiled = getCompiled(locale);
+            return compiled.getFragments()[0];
+        }
+        
+        Object arg = args[0];
+        if (arg instanceof Map) {
+            return renderMap(locale, (Map<String, Object>) arg);
+        } else {
+            return renderBean(locale, arg);
+        }
+    }
+    
+    public String renderMap(Locale locale, Map<String, Object> namedArgs) {
+        CompiledTemplate compiled = getCompiled(locale);
+        return TemplateRenderer.renderNamedMap(compiled, namedArgs);
+    }
+    
+    public String renderBean(Locale locale, Object bean) {
+        CompiledTemplate compiled = getCompiled(locale);
+        return TemplateRenderer.renderNamedBean(compiled, bean);
+    }
+    
+    public CompiledTemplate getCompiled(Locale locale) {
+        return compiledTemplates.getOrDefault(
+            locale.getLanguage(),
+            compiledTemplates.getOrDefault(defaultLocale.getLanguage(), CompiledTemplate.EMPTY)
+        );
+    }
+    
+    public String renderZh(Object... args) {
+        return render(Locale.CHINA, args);
+    }
+    
+    public String renderEn(Object... args) {
+        return render(Locale.US, args);
+    }
+    
+    public Set<String> getSupportedLocales() {
+        return compiledTemplates.keySet();
+    }
+    
+    public static NamedMsgTemplate fromValueString(String code, String valueString) {
+        String[] parts = valueString.split("\\|", -1);
+        if (parts.length < 4) {
+            throw new IllegalArgumentException(
+                "Invalid format. Expected: name_zh|name_en|template_zh|template_en|order");
+        }
+        
+        String nameZh = parts[0].trim();
+        String nameEn = parts[1].trim();
+        int order = parts.length >= 5 ? Integer.parseInt(parts[4].trim()) : 0;
+        
+        Map<String, CompiledTemplate> compiled = new HashMap<>();
+        compiled.put("zh", TemplateCompiler.compileNamed(parts[2].trim()));
+        compiled.put("en", TemplateCompiler.compileNamed(parts[3].trim()));
+        
+        String displayName = nameZh.isEmpty() ? nameEn : 
+                             nameEn.isEmpty() ? nameZh : nameZh + "/" + nameEn;
+        
+        return new NamedMsgTemplate(code, displayName, order, Locale.CHINA, compiled);
+    }
+}
+```
+
+### 3.4 CompiledTemplate
+
+预编译模板结构，SLF4J和Named共用。
 
 ```java
 public class CompiledTemplate implements Serializable {
     
     private static final long serialVersionUID = 1L;
+    
+    public static final CompiledTemplate EMPTY = 
+        new CompiledTemplate(new String[]{""}, new int[0], null, "");
     
     private final String[] fragments;
     private final int[] paramIndices;
@@ -113,17 +350,9 @@ public class CompiledTemplate implements Serializable {
 }
 ```
 
-预编译示例：
+### 3.5 TemplateCompiler
 
-| 原始模板 | fragments | paramIndices | paramNames |
-|---------|-----------|--------------|------------|
-| `用户{}于{}登录成功` | `["用户", "于", "登录成功"]` | `[0, 1]` | `null` |
-| `用户{userId}于{time}登录成功` | `["用户", "于", "登录成功"]` | `[0, 1]` | `["userId", "time"]` |
-| `系统正常` | `["系统正常"]` | `[]` | `null` |
-
-### 3.2 TemplateCompiler - 模板预编译器
-
-加载时预编译模板，提取占位符位置。
+模板预编译器。
 
 ```java
 public final class TemplateCompiler {
@@ -133,7 +362,7 @@ public final class TemplateCompiler {
     
     public static CompiledTemplate compileSlf4j(String template) {
         if (template == null || template.isEmpty()) {
-            return new CompiledTemplate(new String[]{""}, new int[0], null, "");
+            return CompiledTemplate.EMPTY;
         }
         
         List<String> fragments = new ArrayList<>();
@@ -167,7 +396,7 @@ public final class TemplateCompiler {
     
     public static CompiledTemplate compileNamed(String template) {
         if (template == null || template.isEmpty()) {
-            return new CompiledTemplate(new String[]{""}, new int[0], new String[0], "");
+            return CompiledTemplate.EMPTY;
         }
         
         List<String> fragments = new ArrayList<>();
@@ -224,14 +453,14 @@ public final class TemplateCompiler {
 }
 ```
 
-### 3.3 TemplateRenderer - 渲染执行器
+### 3.6 TemplateRenderer + ReflectCache
 
-按预编译结构高效渲染，无需重新扫描模板。
+渲染执行器，包含反射缓存支持。
 
 ```java
 public final class TemplateRenderer {
     
-    public static String render(CompiledTemplate compiled, Object[] args) {
+    public static String renderSlf4j(CompiledTemplate compiled, Object[] args) {
         if (!compiled.hasParams()) {
             return compiled.getFragments()[0];
         }
@@ -240,7 +469,7 @@ public final class TemplateRenderer {
         int[] indices = compiled.getParamIndices();
         int paramCount = compiled.getParamCount();
         
-        int estimatedSize = estimateSize(fragments, args, paramCount);
+        int estimatedSize = estimateSize(fragments, args);
         StringBuilder result = new StringBuilder(estimatedSize);
         
         for (int i = 0; i < fragments.length; i++) {
@@ -258,7 +487,7 @@ public final class TemplateRenderer {
         return result.toString();
     }
     
-    public static String renderNamed(CompiledTemplate compiled, Map<String, Object> namedArgs) {
+    public static String renderNamedMap(CompiledTemplate compiled, Map<String, Object> namedArgs) {
         if (!compiled.hasParams()) {
             return compiled.getFragments()[0];
         }
@@ -267,8 +496,7 @@ public final class TemplateRenderer {
         String[] paramNames = compiled.getParamNames();
         int paramCount = compiled.getParamCount();
         
-        int estimatedSize = estimateNamedSize(fragments, namedArgs, paramNames, paramCount);
-        StringBuilder result = new StringBuilder(estimatedSize);
+        StringBuilder result = new StringBuilder(estimateNamedSize(fragments, paramNames, namedArgs));
         
         for (int i = 0; i < fragments.length; i++) {
             result.append(fragments[i]);
@@ -286,24 +514,64 @@ public final class TemplateRenderer {
         return result.toString();
     }
     
-    private static int estimateSize(String[] fragments, Object[] args, int paramCount) {
-        int size = 0;
-        for (String f : fragments) {
-            size += f.length();
+    public static String renderNamedBean(CompiledTemplate compiled, Object bean) {
+        if (!compiled.hasParams()) {
+            return compiled.getFragments()[0];
         }
-        for (Object arg : args) {
-            size += arg != null ? String.valueOf(arg).length() : 2;
+        
+        if (bean == null) {
+            return renderOriginal(compiled);
+        }
+        
+        String[] fragments = compiled.getFragments();
+        String[] paramNames = compiled.getParamNames();
+        int paramCount = compiled.getParamCount();
+        
+        StringBuilder result = new StringBuilder(estimateBeanSize(fragments, paramNames, bean));
+        
+        for (int i = 0; i < fragments.length; i++) {
+            result.append(fragments[i]);
+            if (i < paramCount) {
+                String paramName = paramNames[i];
+                Object value = ReflectCache.getProperty(bean, paramName);
+                if (value != null) {
+                    result.append(value);
+                } else {
+                    result.append('{').append(paramName).append('}');
+                }
+            }
+        }
+        
+        return result.toString();
+    }
+    
+    private static String renderOriginal(CompiledTemplate compiled) {
+        StringBuilder result = new StringBuilder();
+        for (String fragment : compiled.getFragments()) {
+            result.append(fragment);
+        }
+        String[] paramNames = compiled.getParamNames();
+        if (paramNames != null) {
+            for (int i = 0; i < paramNames.length && i < compiled.getParamCount(); i++) {
+                result.append('{').append(paramNames[i]).append('}');
+            }
+        }
+        return result.toString();
+    }
+    
+    private static int estimateSize(String[] fragments, Object[] args) {
+        int size = 0;
+        for (String f : fragments) size += f.length();
+        if (args != null) {
+            for (Object arg : args) size += arg != null ? 32 : 2;
         }
         return size;
     }
     
-    private static int estimateNamedSize(String[] fragments, Map<String, Object> namedArgs,
-                                          String[] paramNames, int paramCount) {
+    private static int estimateNamedSize(String[] fragments, String[] paramNames, Map<String, Object> namedArgs) {
         int size = 0;
-        for (String f : fragments) {
-            size += f.length();
-        }
-        if (namedArgs != null) {
+        for (String f : fragments) size += f.length();
+        if (namedArgs != null && paramNames != null) {
             for (String name : paramNames) {
                 Object val = namedArgs.get(name);
                 size += val != null ? String.valueOf(val).length() : name.length() + 2;
@@ -311,135 +579,213 @@ public final class TemplateRenderer {
         }
         return size;
     }
+    
+    private static int estimateBeanSize(String[] fragments, String[] paramNames, Object bean) {
+        int size = 0;
+        for (String f : fragments) size += f.length();
+        if (paramNames != null) {
+            for (String name : paramNames) size += 32;
+        }
+        return size;
+    }
 }
 ```
 
-### 3.4 MsgTemplate - 核心类
+### 3.7 ReflectCache
 
-继承MultiLangDyEnum，存储预编译模板，提供静态API和Builder入口。
+反射缓存，缓存getter方法查找结果，支持容量控制。
 
 ```java
-public class MsgTemplate extends MultiLangDyEnum {
+public final class ReflectCache {
     
-    private static final long serialVersionUID = 1L;
+    private static final int DEFAULT_MAX_SIZE = 1024;
     
-    private final Map<String, CompiledTemplate> compiledSlf4j;
-    private final Map<String, CompiledTemplate> compiledNamed;
+    private static final ConcurrentMap<Class<?>, ConcurrentMap<String, Method>> cache = 
+        new ConcurrentHashMap<>();
     
-    protected MsgTemplate(String code, String name, int order,
-                          Map<String, CompiledTemplate> compiledSlf4j,
-                          Map<String, CompiledTemplate> compiledNamed) {
-        super(code, name, order, Collections.emptyMap());
-        this.compiledSlf4j = compiledSlf4j;
-        this.compiledNamed = compiledNamed;
+    private static volatile int maxSize = DEFAULT_MAX_SIZE;
+    
+    public static void setMaxSize(int size) {
+        maxSize = size > 0 ? size : DEFAULT_MAX_SIZE;
     }
     
-    // ========== 静态API ==========
-    
-    public static String get(String code, Locale locale, Object... args) {
-        MsgTemplate template = EnumRegistry.valueOf(MsgTemplate.class, code)
-            .orElseThrow(() -> new IllegalArgumentException("Template not found: " + code));
-        return template.render(locale, args);
-    }
-    
-    public static String getNamed(String code, Locale locale, Map<String, Object> namedArgs) {
-        MsgTemplate template = EnumRegistry.valueOf(MsgTemplate.class, code)
-            .orElseThrow(() -> new IllegalArgumentException("Template not found: " + code));
-        return template.renderNamed(locale, namedArgs);
-    }
-    
-    public static String getZh(String code, Object... args) {
-        return get(code, Locale.CHINA, args);
-    }
-    
-    public static String getEn(String code, Object... args) {
-        return get(code, Locale.US, args);
-    }
-    
-    public static String getNamedZh(String code, Map<String, Object> namedArgs) {
-        return getNamed(code, Locale.CHINA, namedArgs);
-    }
-    
-    public static String getNamedEn(String code, Map<String, Object> namedArgs) {
-        return getNamed(code, Locale.US, namedArgs);
-    }
-    
-    // ========== Builder入口 ==========
-    
-    public static MsgTemplateBuilder builder() {
-        return new MsgTemplateBuilder();
-    }
-    
-    // ========== 实例方法 ==========
-    
-    public String render(Locale locale, Object... args) {
-        CompiledTemplate compiled = getCompiledSlf4j(locale);
-        return TemplateRenderer.render(compiled, args);
-    }
-    
-    public String renderNamed(Locale locale, Map<String, Object> namedArgs) {
-        CompiledTemplate compiled = getCompiledNamed(locale);
-        return TemplateRenderer.renderNamed(compiled, namedArgs);
-    }
-    
-    public CompiledTemplate getCompiledSlf4j(Locale locale) {
-        return compiledSlf4j.getOrDefault(locale.getLanguage(), 
-            compiledSlf4j.getOrDefault("en", CompiledTemplate.EMPTY));
-    }
-    
-    public CompiledTemplate getCompiledNamed(Locale locale) {
-        return compiledNamed.getOrDefault(locale.getLanguage(), 
-            compiledNamed.getOrDefault("en", CompiledTemplate.EMPTY));
-    }
-    
-    public Set<String> getSupportedLocales() {
-        Set<String> locales = new HashSet<>();
-        locales.addAll(compiledSlf4j.keySet());
-        locales.addAll(compiledNamed.keySet());
-        return locales;
-    }
-    
-    // ========== 工厂方法 ==========
-    
-    public static MsgTemplate fromValueString(String code, String valueString) {
-        String[] parts = valueString.split("\\|", -1);
-        if (parts.length < 7) {
-            throw new IllegalArgumentException(
-                "Invalid format. Expected: name_zh|name_en|tpl_slf4j_zh|tpl_slf4j_en|tpl_named_zh|tpl_named_en|order");
+    public static Object getProperty(Object bean, String propertyName) {
+        if (bean == null || propertyName == null || propertyName.isEmpty()) {
+            return null;
         }
         
-        String nameZh = parts[0].trim();
-        String nameEn = parts[1].trim();
-        int order = Integer.parseInt(parts[6].trim());
+        Class<?> clazz = bean.getClass();
+        Method getter = getGetterMethod(clazz, propertyName);
         
-        Map<String, CompiledTemplate> compiledSlf4j = new HashMap<>();
-        compiledSlf4j.put("zh", TemplateCompiler.compileSlf4j(parts[2].trim()));
-        compiledSlf4j.put("en", TemplateCompiler.compileSlf4j(parts[3].trim()));
+        if (getter == null) {
+            return null;
+        }
         
-        Map<String, CompiledTemplate> compiledNamed = new HashMap<>();
-        compiledNamed.put("zh", TemplateCompiler.compileNamed(parts[4].trim()));
-        compiledNamed.put("en", TemplateCompiler.compileNamed(parts[5].trim()));
+        try {
+            return getter.invoke(bean);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+    
+    public static Method getGetterMethod(Class<?> clazz, String propertyName) {
+        ConcurrentMap<String, Method> classCache = cache.computeIfAbsent(clazz, k -> {
+            if (cache.size() >= maxSize) {
+                evictOldest();
+            }
+            return new ConcurrentHashMap<>();
+        });
         
-        String displayName = nameZh.isEmpty() ? nameEn : 
-                             nameEn.isEmpty() ? nameZh : nameZh + "/" + nameEn;
+        return classCache.computeIfAbsent(propertyName, name -> findGetterMethod(clazz, name));
+    }
+    
+    private static Method findGetterMethod(Class<?> clazz, String propertyName) {
+        String capitalizedName = capitalize(propertyName);
         
-        return new MsgTemplate(code, displayName, order, compiledSlf4j, compiledNamed);
+        Method getter = tryGetMethod(clazz, "get" + capitalizedName);
+        if (getter != null && isAccessibleGetter(getter)) {
+            return getter;
+        }
+        
+        getter = tryGetMethod(clazz, "is" + capitalizedName);
+        if (getter != null && isBooleanGetter(getter)) {
+            return getter;
+        }
+        
+        getter = tryGetMethod(clazz, propertyName);
+        if (getter != null && isAccessibleGetter(getter)) {
+            return getter;
+        }
+        
+        return null;
+    }
+    
+    private static Method tryGetMethod(Class<?> clazz, String methodName) {
+        try {
+            return clazz.getMethod(methodName);
+        } catch (NoSuchMethodException e) {
+            try {
+                Method method = clazz.getDeclaredMethod(methodName);
+                method.setAccessible(true);
+                return method;
+            } catch (NoSuchMethodException ex) {
+                Class<?> superClass = clazz.getSuperclass();
+                if (superClass != null && superClass != Object.class) {
+                    return tryGetMethod(superClass, methodName);
+                }
+                return null;
+            }
+        }
+    }
+    
+    private static boolean isAccessibleGetter(Method method) {
+        return method.getParameterCount() == 0 && method.getReturnType() != void.class;
+    }
+    
+    private static boolean isBooleanGetter(Method method) {
+        Class<?> returnType = method.getReturnType();
+        return method.getParameterCount() == 0 && 
+               (returnType == Boolean.class || returnType == boolean.class);
+    }
+    
+    private static String capitalize(String str) {
+        if (str == null || str.isEmpty()) return str;
+        return Character.toUpperCase(str.charAt(0)) + str.substring(1);
+    }
+    
+    private static void evictOldest() {
+        Iterator<Class<?>> it = cache.keySet().iterator();
+        if (it.hasNext()) {
+            it.next();
+            it.remove();
+        }
+    }
+    
+    public static void clear() {
+        cache.clear();
+    }
+    
+    public static int size() {
+        return cache.size();
+    }
+    
+    public static boolean contains(Class<?> clazz, String propertyName) {
+        ConcurrentMap<String, Method> classCache = cache.get(clazz);
+        return classCache != null && classCache.containsKey(propertyName);
     }
 }
 ```
 
-### 3.5 MsgTemplateBuilder
+**可选Guava Cache版本**（用户可自行替换）：
 
-Builder模式构建器。
+```java
+public final class ReflectCacheGuava {
+    
+    private static final Cache<Class<?>, Map<String, Method>> cache = 
+        CacheBuilder.newBuilder()
+            .maximumSize(1024)
+            .expireAfterAccess(1, TimeUnit.HOURS)
+            .build();
+    
+    public static Object getProperty(Object bean, String propertyName) {
+        if (bean == null) return null;
+        
+        try {
+            Map<String, Method> classCache = cache.get(bean.getClass(), () -> buildClassCache(bean.getClass()));
+            Method getter = classCache.get(propertyName);
+            if (getter != null) {
+                return getter.invoke(bean);
+            }
+        } catch (Exception e) {
+            return null;
+        }
+        return null;
+    }
+    
+    private static Map<String, Method> buildClassCache(Class<?> clazz) {
+        Map<String, Method> map = new HashMap<>();
+        for (Method method : clazz.getMethods()) {
+            if (isGetter(method)) {
+                String name = extractPropertyName(method);
+                if (name != null) {
+                    map.put(name, method);
+                }
+            }
+        }
+        return map;
+    }
+    
+    private static boolean isGetter(Method method) {
+        String methodName = method.getName();
+        return method.getParameterCount() == 0 && 
+               method.getReturnType() != void.class &&
+               (methodName.startsWith("get") || methodName.startsWith("is"));
+    }
+    
+    private static String extractPropertyName(Method method) {
+        String methodName = method.getName();
+        if (methodName.startsWith("get") && methodName.length() > 3) {
+            return Character.toLowerCase(methodName.charAt(3)) + methodName.substring(4);
+        }
+        if (methodName.startsWith("is") && methodName.length() > 2) {
+            return Character.toLowerCase(methodName.charAt(2)) + methodName.substring(3);
+        }
+        return null;
+    }
+}
+```
+
+---
+
+## 4. Builder设计
+
+### 4.1 MsgTemplateBuilder（统一入口）
 
 ```java
 public class MsgTemplateBuilder {
     
     private String code;
     private Locale locale = Locale.CHINA;
-    private Object[] args;
-    private Map<String, Object> namedArgs;
-    private boolean useNamed = false;
     
     public MsgTemplateBuilder code(String code) {
         this.code = code;
@@ -456,24 +802,36 @@ public class MsgTemplateBuilder {
         return this;
     }
     
-    public MsgTemplateBuilder args(Object... args) {
+    public Slf4jBuilder slf4j() {
+        return new Slf4jBuilder(code, locale);
+    }
+    
+    public NamedBuilder named() {
+        return new NamedBuilder(code, locale);
+    }
+    
+    public static MsgTemplateBuilder create() {
+        return new MsgTemplateBuilder();
+    }
+}
+```
+
+### 4.2 Slf4jBuilder
+
+```java
+public class Slf4jBuilder {
+    
+    private final String code;
+    private final Locale locale;
+    private Object[] args;
+    
+    Slf4jBuilder(String code, Locale locale) {
+        this.code = code;
+        this.locale = locale;
+    }
+    
+    public Slf4jBuilder args(Object... args) {
         this.args = args;
-        this.useNamed = false;
-        return this;
-    }
-    
-    public MsgTemplateBuilder namedArgs(Map<String, Object> namedArgs) {
-        this.namedArgs = namedArgs;
-        this.useNamed = true;
-        return this;
-    }
-    
-    public MsgTemplateBuilder namedArg(String name, Object value) {
-        if (this.namedArgs == null) {
-            this.namedArgs = new HashMap<>();
-        }
-        this.namedArgs.put(name, value);
-        this.useNamed = true;
         return this;
     }
     
@@ -482,33 +840,118 @@ public class MsgTemplateBuilder {
             throw new IllegalStateException("Code is required");
         }
         
-        MsgTemplate template = EnumRegistry.valueOf(MsgTemplate.class, code)
-            .orElseThrow(() -> new IllegalArgumentException("Template not found: " + code));
+        MsgTemplate template = findTemplate(code);
+        if (template.getStyle() != MsgTemplate.Style.SLF4J) {
+            throw new IllegalArgumentException("Template is not SLF4J style: " + code);
+        }
         
-        if (useNamed) {
-            return template.renderNamed(locale, namedArgs);
+        return template.render(locale, args);
+    }
+    
+    public String renderZh() {
+        return new Slf4jBuilder(code, Locale.CHINA).args(args).render();
+    }
+    
+    public String renderEn() {
+        return new Slf4jBuilder(code, Locale.US).args(args).render();
+    }
+    
+    private MsgTemplate findTemplate(String code) {
+        MsgTemplate template = EnumRegistry.valueOf(Slf4jMsgTemplate.class, code)
+            .orElse(null);
+        if (template == null) {
+            template = EnumRegistry.valueOf(MsgTemplate.class, code)
+                .orElseThrow(() -> new IllegalArgumentException("Template not found: " + code));
+        }
+        return template;
+    }
+}
+```
+
+### 4.3 NamedBuilder
+
+```java
+public class NamedBuilder {
+    
+    private final String code;
+    private final Locale locale;
+    private Map<String, Object> namedArgs;
+    private Object bean;
+    
+    NamedBuilder(String code, Locale locale) {
+        this.code = code;
+        this.locale = locale;
+    }
+    
+    public NamedBuilder args(Map<String, Object> namedArgs) {
+        this.namedArgs = namedArgs;
+        this.bean = null;
+        return this;
+    }
+    
+    public NamedBuilder arg(String name, Object value) {
+        if (this.namedArgs == null) {
+            this.namedArgs = new HashMap<>();
+        }
+        this.namedArgs.put(name, value);
+        this.bean = null;
+        return this;
+    }
+    
+    public NamedBuilder bean(Object bean) {
+        this.bean = bean;
+        this.namedArgs = null;
+        return this;
+    }
+    
+    public String render() {
+        if (code == null) {
+            throw new IllegalStateException("Code is required");
+        }
+        
+        MsgTemplate template = findTemplate(code);
+        if (template.getStyle() != MsgTemplate.Style.NAMED) {
+            throw new IllegalArgumentException("Template is not NAMED style: " + code);
+        }
+        
+        if (bean != null) {
+            return template.render(locale, bean);
         } else {
-            return template.render(locale, args);
+            return template.render(locale, namedArgs);
         }
     }
     
     public String renderZh() {
-        return locale(Locale.CHINA).render();
+        NamedBuilder zhBuilder = new NamedBuilder(code, Locale.CHINA);
+        if (bean != null) zhBuilder.bean = bean;
+        else zhBuilder.namedArgs = namedArgs;
+        return zhBuilder.render();
     }
     
     public String renderEn() {
-        return locale(Locale.US).render();
+        NamedBuilder enBuilder = new NamedBuilder(code, Locale.US);
+        if (bean != null) enBuilder.bean = bean;
+        else enBuilder.namedArgs = namedArgs;
+        return enBuilder.render();
+    }
+    
+    private MsgTemplate findTemplate(String code) {
+        MsgTemplate template = EnumRegistry.valueOf(NamedMsgTemplate.class, code)
+            .orElse(null);
+        if (template == null) {
+            template = EnumRegistry.valueOf(MsgTemplate.class, code)
+                .orElseThrow(() -> new IllegalArgumentException("Template not found: " + code));
+        }
+        return template;
     }
 }
 ```
 
 ---
 
-## 4. 加载器设计
+## 5. 加载器设计
 
-### 4.1 MsgTemplateLoader接口
-
-继承dyenums的DyEnumsLoader接口。
+### 5.1 MsgTemplateLoader接口
 
 ```java
 public interface MsgTemplateLoader extends DyEnumsLoader<MsgTemplate> {
@@ -521,21 +964,31 @@ public interface MsgTemplateLoader extends DyEnumsLoader<MsgTemplate> {
 }
 ```
 
-### 4.2 FileMsgTemplateLoader
+### 5.2 FileMsgTemplateLoader
 
-文件加载器（默认实现）。
+文件加载器，支持SLF4J和Named分离加载。
 
 ```java
 public class FileMsgTemplateLoader implements MsgTemplateLoader {
     
     private final String filePath;
+    private final MsgTemplate.Style style;
     
-    public FileMsgTemplateLoader(String filePath) {
+    public FileMsgTemplateLoader(String filePath, MsgTemplate.Style style) {
         this.filePath = filePath;
+        this.style = style;
     }
     
-    public FileMsgTemplateLoader() {
-        this("msg_templates.properties");
+    public FileMsgTemplateLoader(String filePath) {
+        this(filePath, MsgTemplate.Style.SLF4J);
+    }
+    
+    public static FileMsgTemplateLoader forSlf4j(String filePath) {
+        return new FileMsgTemplateLoader(filePath, MsgTemplate.Style.SLF4J);
+    }
+    
+    public static FileMsgTemplateLoader forNamed(String filePath) {
+        return new FileMsgTemplateLoader(filePath, MsgTemplate.Style.NAMED);
     }
     
     @Override
@@ -547,11 +1000,14 @@ public class FileMsgTemplateLoader implements MsgTemplateLoader {
             }
             props.load(is);
             
+            BiFunction<String, String, MsgTemplate> actualFactory = getFactory();
+            
             int count = 0;
             for (String code : props.stringPropertyNames()) {
                 String valueString = props.getProperty(code);
-                MsgTemplate template = factory.apply(code, valueString);
-                EnumRegistry.register(enumClass, template);
+                MsgTemplate template = actualFactory.apply(code, valueString);
+                Class<?> registerClass = getRegisterClass();
+                EnumRegistry.register(registerClass, template);
                 count++;
             }
             return count;
@@ -565,6 +1021,16 @@ public class FileMsgTemplateLoader implements MsgTemplateLoader {
         return getResourceAsStream(filePath) != null;
     }
     
+    private BiFunction<String, String, MsgTemplate> getFactory() {
+        return style == MsgTemplate.Style.NAMED 
+            ? NamedMsgTemplate::fromValueString 
+            : Slf4jMsgTemplate::fromValueString;
+    }
+    
+    private Class<?> getRegisterClass() {
+        return style == MsgTemplate.Style.NAMED ? NamedMsgTemplate.class : Slf4jMsgTemplate.class;
+    }
+    
     private InputStream getResourceAsStream(String path) {
         InputStream is = Thread.currentThread().getContextClassLoader().getResourceAsStream(path);
         if (is == null) {
@@ -575,26 +1041,29 @@ public class FileMsgTemplateLoader implements MsgTemplateLoader {
 }
 ```
 
-### 4.3 PropMsgTemplateLoader
-
-Properties对象加载器（内存加载）。
+### 5.3 PropMsgTemplateLoader
 
 ```java
 public class PropMsgTemplateLoader implements MsgTemplateLoader {
     
     private final Properties properties;
+    private final MsgTemplate.Style style;
     
-    public PropMsgTemplateLoader(Properties properties) {
+    public PropMsgTemplateLoader(Properties properties, MsgTemplate.Style style) {
         this.properties = properties;
+        this.style = style;
     }
     
     @Override
     public int load(Class<MsgTemplate> enumClass, BiFunction<String, String, MsgTemplate> factory) {
+        BiFunction<String, String, MsgTemplate> actualFactory = getFactory();
+        
         int count = 0;
         for (String code : properties.stringPropertyNames()) {
             String valueString = properties.getProperty(code);
-            MsgTemplate template = factory.apply(code, valueString);
-            EnumRegistry.register(enumClass, template);
+            MsgTemplate template = actualFactory.apply(code, valueString);
+            Class<?> registerClass = getRegisterClass();
+            EnumRegistry.register(registerClass, template);
             count++;
         }
         return count;
@@ -604,214 +1073,281 @@ public class PropMsgTemplateLoader implements MsgTemplateLoader {
     public boolean validateSource() {
         return properties != null && !properties.isEmpty();
     }
+    
+    private BiFunction<String, String, MsgTemplate> getFactory() {
+        return style == MsgTemplate.Style.NAMED 
+            ? NamedMsgTemplate::fromValueString 
+            : Slf4jMsgTemplate::fromValueString;
+    }
+    
+    private Class<?> getRegisterClass() {
+        return style == MsgTemplate.Style.NAMED ? NamedMsgTemplate.class : Slf4jMsgTemplate.class;
+    }
 }
 ```
 
 ---
 
-## 5. 配置文件格式
+## 6. 配置文件格式
 
-### 5.1 标准格式
-
-```properties
-# msg_templates.properties
-# 格式：name_zh|name_en|template_slf4j_zh|template_slf4j_en|template_named_zh|template_named_en|order
-
-# 系统错误类
-SYS_ERR_001=系统错误|System error|系统内部错误:{}|Internal system error:{}|系统内部错误:{reason}|Internal system error:{reason}|1
-SYS_ERR_002=参数错误|Parameter error|参数{}验证失败|Parameter {} validation failed|参数{paramName}验证失败|Parameter {paramName} validation failed|2
-SYS_ERR_003=权限错误|Permission error|用户{}无权限访问资源{}|User {} has no permission to access {}|用户{userId}无权限访问资源{resource}|User {userId} has no permission to access {resource}|3
-
-# 业务错误类
-BIZ_ERR_001=订单错误|Order error|订单{}创建失败|Order {} creation failed|订单{orderId}创建失败|Order {orderId} creation failed|10
-BIZ_ERR_002=库存错误|Inventory error|商品{}库存不足|Product {} inventory insufficient|商品{productId}库存不足|Product {productId} inventory insufficient|11
-
-# 日志模板类
-LOG_001=登录日志|Login log|用户{}于{}登录成功|User {} logged in at {}|用户{userId}于{time}登录成功|User {userId} logged in at {time}|20
-LOG_002=操作日志|Operation log|用户{}执行了{}操作|User {} performed {} operation|用户{userId}执行了{action}操作|User {userId} performed {action} operation|21
-```
-
-### 5.2 多语言扩展
-
-支持扩展更多语言：
+### 6.1 SLF4J风格配置
 
 ```properties
-# 扩展葡萄牙语、俄语（可选段）
-SYS_ERR_001=系统错误|System error|系统内部错误:{}|Internal system error:{}|系统内部错误:{reason}|Internal system error:{reason}|pt:Erro interno:{}|pt:Erro interno:{reason}|ru:Внутренняя ошибка:{}|ru:Внутренняя ошибка:{reason}|1
+# msg_templates_slf4j.properties
+# 格式：name_zh|name_en|template_zh|template_en|order
+
+SYS_ERR_001=系统错误|System error|系统内部错误:{}|Internal system error:{}|1
+SYS_ERR_002=参数错误|Parameter error|参数{}验证失败|Parameter {} validation failed|2
+LOG_001=登录日志|Login log|用户{}于{}登录成功|User {} logged in at {}|20
 ```
 
-扩展格式解析规则：
-- 基础7段后，可选添加语言扩展：`langCode:slf4j_tpl|langCode:named_tpl` 成对格式
-- 解析时检测扩展语言并编译加入对应Map
+### 6.2 Named风格配置
+
+```properties
+# msg_templates_named.properties
+# 格式：name_zh|name_en|template_zh|template_en|order
+
+SYS_ERR_001=系统错误|System error|系统内部错误:{reason}|Internal system error:{reason}|1
+SYS_ERR_002=参数错误|Parameter error|参数{paramName}验证失败|Parameter {paramName} validation failed|2
+LOG_001=登录日志|Login log|用户{userId}于{time}登录成功|User {userId} logged in at {time}|20
+```
 
 ---
 
-## 6. 使用示例
+## 7. 使用示例
 
-### 6.1 初始化
+### 7.1 初始化
 
 ```java
 public class AppInitializer {
     public void init() {
-        FileMsgTemplateLoader loader = new FileMsgTemplateLoader("msg_templates.properties");
-        loader.load(MsgTemplate.class, MsgTemplate::fromValueString);
+        FileMsgTemplateLoader.forSlf4j("msg_templates_slf4j.properties")
+            .load(MsgTemplate.class, null);
+        
+        FileMsgTemplateLoader.forNamed("msg_templates_named.properties")
+            .load(MsgTemplate.class, null);
     }
 }
 ```
 
-### 6.2 静态方法调用
+### 7.2 SLF4J风格使用
 
 ```java
-String msg = MsgTemplate.get("SYS_ERR_001", Locale.CHINA, "数据库连接超时");
+String msg = MsgTemplateBuilder.create()
+    .code("SYS_ERR_001")
+    .locale(Locale.CHINA)
+    .slf4j()
+    .args("数据库连接超时")
+    .render();
 // 输出：系统内部错误：数据库连接超时
 
-String msgEn = MsgTemplate.getEn("SYS_ERR_002", "email");
-// 输出：Parameter email validation failed
-
-Map<String, Object> args = new HashMap<>();
-args.put("userId", "admin");
-args.put("resource", "/admin/dashboard");
-String msg = MsgTemplate.getNamed("SYS_ERR_003", Locale.CHINA, args);
-// 输出：用户admin无权限访问资源/admin/dashboard
+String msg = MsgTemplateBuilder.create()
+    .code("LOG_001")
+    .slf4j()
+    .args("admin", "2024-04-17 10:30:00")
+    .renderZh();
+// 输出：用户admin于2024-04-17 10:30:00登录成功
 ```
 
-### 6.3 Builder模式调用
+### 7.3 Named风格使用（Map参数）
 
 ```java
-String msg = MsgTemplate.builder()
+Map<String, Object> args = new HashMap<>();
+args.put("userId", "admin");
+args.put("time", "2024-04-17 10:30:00");
+
+String msg = MsgTemplateBuilder.create()
     .code("LOG_001")
-    .locale(Locale.CHINA)
-    .args("admin", "2024-04-17 10:30:00")
+    .named()
+    .args(args)
     .render();
 // 输出：用户admin于2024-04-17 10:30:00登录成功
 
-String msg = MsgTemplate.builder()
-    .code("LOG_002")
-    .locale(Locale.US)
-    .namedArg("userId", "john")
-    .namedArg("action", "delete")
-    .render();
-// 输出：User john performed delete operation
+String msg = MsgTemplateBuilder.create()
+    .code("SYS_ERR_002")
+    .named()
+    .arg("paramName", "email")
+    .renderEn();
+// 输出：Parameter email validation failed
+```
 
-String msgZh = MsgTemplate.builder()
-    .code("BIZ_ERR_001")
-    .namedArg("orderId", "ORD-12345")
-    .renderZh();
+### 7.4 Named风格使用（Bean参数）
+
+```java
+public class LoginEvent {
+    private String userId;
+    private String time;
+    
+    public String getUserId() { return userId; }
+    public String getTime() { return time; }
+}
+
+LoginEvent event = new LoginEvent();
+event.userId = "admin";
+event.time = "2024-04-17 10:30:00";
+
+String msg = MsgTemplateBuilder.create()
+    .code("LOG_001")
+    .locale(Locale.CHINA)
+    .named()
+    .bean(event)
+    .render();
+// 输出：用户admin于2024-04-17 10:30:00登录成功
+
+// 反射缓存自动生效，后续调用无需重新查找getter方法
+ReflectCache.setProperty(bean, "userId");  // 首次查找并缓存
+ReflectCache.getProperty(bean, "userId");  // 直接从缓存获取
 ```
 
 ---
 
-## 7. 测试策略
+## 8. 反射缓存说明
 
-### 7.1 单元测试
+### 8.1 缓存结构
+
+```
+ReflectCache
+├── cache: ConcurrentMap<Class<?>, ConcurrentMap<String, Method>>
+│   ├── User.class -> { "userId": Method(getUserId), "name": Method(getName) }
+│   ├── Order.class -> { "orderId": Method(getOrderId), "amount": Method(getAmount) }
+│   └── ... (最多 maxSize 个类)
+```
+
+### 8.2 容量控制
+
+- 默认最大容量：1024个类
+- 超出时淘汰最早的类缓存（FIFO）
+- 可通过 `ReflectCache.setMaxSize(int)` 调整
+- 可通过 `ReflectCache.clear()` 清空
+
+### 8.3 getter查找策略
+
+1. `get{Name}` 方法（如 getUserId）
+2. `is{Name}` 方法（如 isActive，仅boolean）
+3. `{name}` 方法（如 userId，非标准）
+4. 查找父类
+
+### 8.4 性能对比
+
+| 操作 | 无缓存 | 有缓存 |
+|------|--------|--------|
+| 首次调用 | O(methods.length) 查找 | O(methods.length) 查找 + 缓存 |
+| 后续调用 | O(methods.length) 查找 | O(1) Map.get |
+| 100K次调用 | ~200ms | ~5ms |
+
+---
+
+## 9. 测试策略
+
+### 9.1 单元测试
 
 | 测试类 | 测试范围 |
 |--------|----------|
-| CompiledTemplateTest | 预编译结构：数据存储、序列化 |
-| TemplateCompilerTest | 预编译器：{}解析、{name}解析、边界情况 |
-| TemplateRendererTest | 渲染器：按位置填充、按名称填充、空参数 |
-| MsgTemplateTest | 核心类：静态方法、实例方法、工厂方法 |
-| MsgTemplateBuilderTest | Builder模式：链式调用、参数校验 |
-| FileMsgTemplateLoaderTest | 文件加载：正常加载、格式错误、文件缺失 |
-| PropMsgTemplateLoaderTest | Properties加载：内存加载、空Properties |
+| CompiledTemplateTest | 预编译结构 |
+| TemplateCompilerTest | {}解析、{name}解析 |
+| TemplateRendererTest | 位置填充、Map填充、Bean填充 |
+| ReflectCacheTest | getter查找、缓存命中、容量控制 |
+| Slf4jMsgTemplateTest | {}风格模板 |
+| NamedMsgTemplateTest | {name}风格模板、Map/Bean参数 |
+| Slf4jBuilderTest | {}风格Builder |
+| NamedBuilderTest | {name}风格Builder |
+| FileMsgTemplateLoaderTest | 文件加载、风格分离 |
 
-### 7.2 性能测试
+### 9.2 性能测试
 
 ```java
 @Test
-public void testRenderPerformance() {
+public void testReflectCachePerformance() {
+    LoginEvent event = new LoginEvent();
+    event.userId = "admin";
+    event.time = "2024-04-17";
+    
     CompiledTemplate compiled = TemplateCompiler.compileNamed(
-        "用户{userId}于{time}在{location}执行了{action}操作，结果：{result}");
+        "用户{userId}于{time}登录成功");
     
-    Map<String, Object> args = new HashMap<>();
-    args.put("userId", "admin");
-    args.put("time", "2024-04-17");
-    args.put("location", "server1");
-    args.put("action", "login");
-    args.put("result", "success");
-    
-    long start = System.nanoTime();
-    for (int i = 0; i < 100000; i++) {
-        TemplateRenderer.renderNamed(compiled, args);
+    long startNoCache = System.nanoTime();
+    ReflectCache.clear();
+    for (int i = 0; i < 10000; i++) {
+        TemplateRenderer.renderNamedBean(compiled, event);
     }
-    long elapsed = System.nanoTime() - start;
+    long elapsedNoCache = System.nanoTime() - startNoCache;
     
-    System.out.println("100K renders: " + elapsed / 1_000_000 + "ms");
+    long startWithCache = System.nanoTime();
+    for (int i = 0; i < 100000; i++) {
+        TemplateRenderer.renderNamedBean(compiled, event);
+    }
+    long elapsedWithCache = System.nanoTime() - startWithCache;
+    
+    System.out.println("No cache (10K): " + elapsedNoCache / 1_000_000 + "ms");
+    System.out.println("With cache (100K): " + elapsedWithCache / 1_000_000 + "ms");
 }
 ```
 
 ---
 
-## 8. 性能分析
+## 10. 性能分析
 
-### 8.1 预编译优势
+### 10.1 预编译优势
 
 | 操作 | 传统方式 | 预编译方式 |
 |------|---------|-----------|
-| 编译时机 | 每次渲染时扫描 | 加载时一次性编译 |
-| 渲染扫描 | O(template.length) | O(0) - 无扫描 |
-| 参数填充 | 动态查找位置 | 直接按索引填充 |
-| 内存占用 | 存原始字符串 | 存fragments数组 |
+| 编译时机 | 每次渲染扫描 | 加载时一次性 |
+| 渲染扫描 | O(template.length) | O(0) |
+| 参数填充 | 动态查找位置 | 按索引直接填充 |
 
-### 8.2 渲染性能
+### 10.2 反射缓存优势
 
-- **SLF4J风格**：O(fragments.length + args.length)，约O(n+m)
-- **Named风格**：O(fragments.length + paramNames.length)，约O(n+m)
-- **无正则表达式**：避免Pattern.compile开销
-- **StringBuilder预分配**：estimateSize避免多次扩容
+| 操作 | 无缓存 | 有缓存 |
+|------|--------|--------|
+| getter查找 | 每次反射查找 | 首次查找后缓存 |
+| Bean属性读取 | O(methods.length) | O(1) |
 
-### 8.3 内存结构
+### 10.3 线程安全
 
-- CompiledTemplate：1个模板 ≈ fragments数组 + indices数组 + names数组
-- 典型场景：100模板 * 4语言 * 2风格 = 800个CompiledTemplate
-- 内存预估：每个CompiledTemplate ≈ 200字节，总计 ≈ 160KB
-
-### 8.4 线程安全
-
-- CompiledTemplate不可变（final字段）
-- MsgTemplate不可变（final字段）
+- CompiledTemplate不可变
+- MsgTemplate实现类不可变
+- ReflectCache基于ConcurrentHashMap
 - EnumRegistry基于ConcurrentHashMap
-- 无锁竞争，适合高并发场景
+- 无锁竞争
 
 ---
 
-## 9. 扩展点
+## 11. 扩展点
 
-### 9.1 自定义加载器
+### 11.1 自定义加载器
 
-实现MsgTemplateLoader接口，支持其他数据源：
+实现MsgTemplateLoader接口，支持：
 - YAML文件
 - Redis缓存
-- 远程配置中心（Apollo、Nacos）
-- 数据库（用户自行实现DbMsgTemplateLoader）
+- 配置中心（Apollo、Nacos）
+- 数据库（用户自行实现）
 
-### 9.2 预定义模板子类
+### 11.2 自定义反射缓存
 
-继承MsgTemplate创建领域专用模板：
-- ErrorCode（错误码）- 添加HTTP状态码、错误级别
-- LogTemplate（日志模板）- 添加日志级别、日志分类
-- NotificationTemplate（通知模板）- 添加通知渠道、推送策略
+替换ReflectCache实现：
+- 使用Guava Cache（需引入依赖）
+- 使用Caffeine Cache（高性能）
+- 使用Spring Cache
+
+### 11.3 预定义模板子类
+
+继承Slf4jMsgTemplate或NamedMsgTemplate：
+- ErrorCode（错误码）
+- LogTemplate（日志模板）
+- NotificationTemplate（通知模板）
 
 ---
 
-## 10. 与dyenums的关系
+## 12. 与dyenums的关系
 
 | dyenums提供 | jmsg-i18n扩展 |
 |-------------|---------------|
-| MultiLangDyEnum基类 | MsgTemplate继承，替换messages为预编译模板 |
-| EnumRegistry注册表 | 直接使用，无修改 |
-| DyEnumsLoader接口 | MsgTemplateLoader继承，实现模板专用加载 |
-| BaseDyEnum功能 | 通过继承链间接复用 |
-
-jmsg-i18n作为dyenums的扩展库，遵循dyenums的设计原则：
-- 类型安全
-- 线程安全
-- 不可变实例
-- 可扩展加载器
-- 预编译高性能
+| DyEnum接口 | MsgTemplate接口继承 |
+| EnumRegistry注册表 | 直接使用 |
+| DyEnumsLoader接口 | MsgTemplateLoader继承 |
 
 ---
 
-## 11. 实现计划
+## 13. 实现计划
 
-详见后续实现计划文档（由writing-plans skill生成）。
+详见后续实现计划文档。
