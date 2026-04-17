@@ -14,6 +14,7 @@
 - 预编译模板，高性能渲染
 - Named风格支持Map参数和Bean参数（反射），缓存getter方法
 - 默认Locale可配置（全局配置或API设置）
+- ThreadLocal StringBuilder池化，避免频繁创建/扩容
 
 ### 1.3 选定方案
 方案C优化：MsgTemplate接口 + 双实现类 + 预编译模板引擎 + 反射缓存 + 全局配置
@@ -44,7 +45,8 @@ cn.itcraft.jmsg
 │   └── NamedBuilder.java         # {name}风格Builder
 └── util
     ├── LocaleHelper.java         # Locale辅助工具
-    └── ReflectCache.java         # 反射缓存（可选Guava）
+    ├── ReflectCache.java         # 反射缓存（可选Guava）
+    └── StringBuilderPool.java    # ThreadLocal StringBuilder池化
 ```
 
 ### 2.2 依赖关系
@@ -520,7 +522,7 @@ public final class TemplateCompiler {
 
 ### 3.7 TemplateRenderer + ReflectCache
 
-渲染执行器，包含反射缓存支持，方法名从renderSlf4j改为renderSimple。
+渲染执行器，包含反射缓存支持，使用ThreadLocal StringBuilder池化提升性能。
 
 ```java
 public final class TemplateRenderer {
@@ -535,7 +537,7 @@ public final class TemplateRenderer {
         int paramCount = compiled.getParamCount();
         
         int estimatedSize = estimateSize(fragments, args);
-        StringBuilder result = new StringBuilder(estimatedSize);
+        StringBuilder result = StringBuilderPool.acquire(estimatedSize);
         
         for (int i = 0; i < fragments.length; i++) {
             result.append(fragments[i]);
@@ -549,7 +551,7 @@ public final class TemplateRenderer {
             }
         }
         
-        return result.toString();
+        return StringBuilderPool.releaseAndToString(result);
     }
     
     public static String renderNamedMap(CompiledTemplate compiled, Map<String, Object> namedArgs) {
@@ -561,7 +563,8 @@ public final class TemplateRenderer {
         String[] paramNames = compiled.getParamNames();
         int paramCount = compiled.getParamCount();
         
-        StringBuilder result = new StringBuilder(estimateNamedSize(fragments, paramNames, namedArgs));
+        int estimatedSize = estimateNamedSize(fragments, paramNames, namedArgs);
+        StringBuilder result = StringBuilderPool.acquire(estimatedSize);
         
         for (int i = 0; i < fragments.length; i++) {
             result.append(fragments[i]);
@@ -576,7 +579,7 @@ public final class TemplateRenderer {
             }
         }
         
-        return result.toString();
+        return StringBuilderPool.releaseAndToString(result);
     }
     
     public static String renderNamedBean(CompiledTemplate compiled, Object bean) {
@@ -596,7 +599,8 @@ public final class TemplateRenderer {
         String[] paramNames = compiled.getParamNames();
         int paramCount = compiled.getParamCount();
         
-        StringBuilder result = new StringBuilder(estimateBeanSize(fragments, paramNames, bean));
+        int estimatedSize = estimateBeanSize(fragments, paramNames, bean);
+        StringBuilder result = StringBuilderPool.acquire(estimatedSize);
         
         for (int i = 0; i < fragments.length; i++) {
             result.append(fragments[i]);
@@ -611,7 +615,7 @@ public final class TemplateRenderer {
             }
         }
         
-        return result.toString();
+        return StringBuilderPool.releaseAndToString(result);
     }
     
     private static String renderNamedBeanNoCache(CompiledTemplate compiled, Object bean) {
@@ -619,7 +623,7 @@ public final class TemplateRenderer {
         String[] paramNames = compiled.getParamNames();
         int paramCount = compiled.getParamCount();
         
-        StringBuilder result = new StringBuilder();
+        StringBuilder result = StringBuilderPool.acquire();
         
         for (int i = 0; i < fragments.length; i++) {
             result.append(fragments[i]);
@@ -634,11 +638,11 @@ public final class TemplateRenderer {
             }
         }
         
-        return result.toString();
+        return StringBuilderPool.releaseAndToString(result);
     }
     
     private static String renderOriginal(CompiledTemplate compiled) {
-        StringBuilder result = new StringBuilder();
+        StringBuilder result = StringBuilderPool.acquire();
         for (String fragment : compiled.getFragments()) {
             result.append(fragment);
         }
@@ -648,7 +652,7 @@ public final class TemplateRenderer {
                 result.append('{').append(paramNames[i]).append('}');
             }
         }
-        return result.toString();
+        return StringBuilderPool.releaseAndToString(result);
     }
     
     private static int estimateSize(String[] fragments, Object[] args) {
@@ -682,6 +686,65 @@ public final class TemplateRenderer {
     }
 }
 ```
+
+### 3.7.1 StringBuilderPool
+
+ThreadLocal StringBuilder池化，避免频繁创建和扩容，提升渲染性能。
+
+```java
+public final class StringBuilderPool {
+    
+    private static final int DEFAULT_INITIAL_CAPACITY = 256;
+    
+    private static final ThreadLocal<StringBuilder> pool = ThreadLocal.withInitial(
+        () -> new StringBuilder(DEFAULT_INITIAL_CAPACITY)
+    );
+    
+    public static StringBuilder acquire(int estimatedSize) {
+        StringBuilder sb = pool.get();
+        sb.setLength(0);
+        if (estimatedSize > sb.capacity()) {
+            sb.ensureCapacity(estimatedSize);
+        }
+        return sb;
+    }
+    
+    public static StringBuilder acquire() {
+        StringBuilder sb = pool.get();
+        sb.setLength(0);
+        return sb;
+    }
+    
+    public static String releaseAndToString(StringBuilder sb) {
+        return sb.toString();
+    }
+    
+    public static int getCurrentCapacity() {
+        return pool.get().capacity();
+    }
+    
+    public static void clear() {
+        pool.remove();
+    }
+}
+```
+
+**使用方式**：
+
+```java
+StringBuilder sb = StringBuilderPool.acquire(estimatedSize);
+sb.append(fragment).append(value);
+return StringBuilderPool.releaseAndToString(sb);
+```
+
+**性能优势**：
+
+| 场景 | 传统方式 | ThreadLocal池化 |
+|------|---------|-----------------|
+| 对象创建 | 每次new StringBuilder | ThreadLocal复用 |
+| 内存分配 | 每次分配新内存 | 同一线程复用 |
+| 扩容开销 | 频繁扩容 | ensureCapacity一次 |
+| GC压力 | 高 | 低 |
 
 ### 3.8 ReflectCache
 
