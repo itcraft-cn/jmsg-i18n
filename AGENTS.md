@@ -6,7 +6,7 @@
 
 - **Java**: 8+ (测试 JDK 25)
 - **构建**: Maven / mvnd (首选 mvnd)
-- **依赖**: dyenums-core, dyenums-loader-file, dyenums-loader-db (各 1.0.0)
+- **依赖**: dyenums-core, dyenums-loader-file (各 1.0.0)
 - **测试**: JUnit 4 + Mockito + PowerMock + JMH 1.37
 
 ## 常用命令
