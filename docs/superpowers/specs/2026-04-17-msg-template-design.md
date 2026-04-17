@@ -9,11 +9,12 @@
 - 支持参数化模板（占位符替换）
 - 支持双模板风格：{} (SLF4J) 和 {name} (命名参数)
 - 通用消息模板设计，可扩展错误码、日志、通知等
-- 加载器多态设计，默认文件模式，易扩展数据库/API等
+- 加载器多态设计，默认文件模式，其他数据源由用户自行扩展
 - 提供静态方法+Builder双API风格
+- 预编译模板，高性能渲染
 
 ### 1.3 选定方案
-方案C：MsgTemplate继承MultiLangDyEnum + 内置可配置模板引擎 + 双模板存储
+方案C：MsgTemplate继承MultiLangDyEnum + 预编译模板引擎 + 双模板存储
 
 ---
 
@@ -25,15 +26,13 @@
 cn.itcraft.jmsg
 ├── core
 │   ├── MsgTemplate.java          # 核心类，继承MultiLangDyEnum
-│   ├── MsgTemplateRenderer.java  # 模板渲染引擎接口
-│   ├── Slf4jStyleRenderer.java   # {} 风格渲染器实现
-│   ├── NamedStyleRenderer.java   # {name} 风格渲染器实现
-│   └── MsgTemplateConfig.java    # 全局配置类
+│   ├── CompiledTemplate.java     # 预编译模板结构
+│   ├── TemplateCompiler.java     # 模板预编译器
+│   └── TemplateRenderer.java     # 渲染执行器
 ├── loader
 │   ├── MsgTemplateLoader.java    # 加载器接口（继承DyEnumsLoader）
 │   ├── FileMsgTemplateLoader.java# 文件加载器（默认）
-│   ├── PropMsgTemplateLoader.java# Properties加载器
-│   └── DbMsgTemplateLoader.java  # 数据库加载器（扩展）
+│   └── PropMsgTemplateLoader.java# Properties加载器
 ├── builder
 │   └── MsgTemplateBuilder.java   # Builder模式构建器
 └── util
@@ -48,18 +47,26 @@ cn.itcraft.jmsg
 │   MsgTemplate.get() / MsgTemplate.builder().render()         │
 ├─────────────────────────────────────────────────────────────┤
 │   MsgTemplate (核心类，继承 MultiLangDyEnum)                  │
-│   ├── messagesSlf4j: Map<Locale, String>                     │
-│   ├── messagesNamed: Map<Locale, String>                     │
+│   ├── compiledSlf4j: Map<Locale, CompiledTemplate>           │
+│   ├── compiledNamed: Map<Locale, CompiledTemplate>           │
 │   ├── render(), renderNamed()                                │
 ├─────────────────────────────────────────────────────────────┤
-│   MsgTemplateRenderer (渲染引擎接口)                          │
-│   ├── Slf4jStyleRenderer: {}占位符                           │
-│   ├── NamedStyleRenderer: {name}占位符                        │
+│   CompiledTemplate (预编译模板结构)                           │
+│   ├── fragments: String[]        文本片段                    │
+│   ├── paramIndices: int[]        {}位置索引                  │
+│   ├── paramNames: String[]       {name}参数名                │
 ├─────────────────────────────────────────────────────────────┤
-│   MsgTemplateLoader (加载器接口，继承DyEnumsLoader)            │
+│   TemplateCompiler (预编译器)                                │
+│   ├── compileSlf4j(template) -> CompiledTemplate             │
+│   ├── compileNamed(template) -> CompiledTemplate             │
+├─────────────────────────────────────────────────────────────┤
+│   TemplateRenderer (渲染执行器)                              │
+│   ├── render(compiled, args) -> String                       │
+│   ├── renderNamed(compiled, namedArgs) -> String             │
+├─────────────────────────────────────────────────────────────┤
+│   MsgTemplateLoader (加载器接口)                              │
 │   ├── FileMsgTemplateLoader (默认)                           │
 │   ├── PropMsgTemplateLoader                                  │
-│   ├── DbMsgTemplateLoader (扩展)                             │
 ├─────────────────────────────────────────────────────────────┤
 │   dyenums-core (基础依赖)                                     │
 │   ├── MultiLangDyEnum                                        │
@@ -72,27 +79,259 @@ cn.itcraft.jmsg
 
 ## 3. 核心类设计
 
-### 3.1 MsgTemplate
+### 3.1 CompiledTemplate - 预编译模板结构
 
-继承MultiLangDyEnum，双模板存储，内置渲染能力。
+核心数据结构，存储预编译后的模板信息。
+
+```java
+public class CompiledTemplate implements Serializable {
+    
+    private static final long serialVersionUID = 1L;
+    
+    private final String[] fragments;
+    private final int[] paramIndices;
+    private final String[] paramNames;
+    private final int paramCount;
+    private final String originalTemplate;
+    
+    CompiledTemplate(String[] fragments, int[] paramIndices, 
+                     String[] paramNames, String originalTemplate) {
+        this.fragments = fragments;
+        this.paramIndices = paramIndices;
+        this.paramNames = paramNames;
+        this.paramCount = paramIndices.length;
+        this.originalTemplate = originalTemplate;
+    }
+    
+    public String[] getFragments() { return fragments; }
+    public int[] getParamIndices() { return paramIndices; }
+    public String[] getParamNames() { return paramNames; }
+    public int getParamCount() { return paramCount; }
+    public String getOriginalTemplate() { return originalTemplate; }
+    
+    public boolean hasParams() { return paramCount > 0; }
+}
+```
+
+预编译示例：
+
+| 原始模板 | fragments | paramIndices | paramNames |
+|---------|-----------|--------------|------------|
+| `用户{}于{}登录成功` | `["用户", "于", "登录成功"]` | `[0, 1]` | `null` |
+| `用户{userId}于{time}登录成功` | `["用户", "于", "登录成功"]` | `[0, 1]` | `["userId", "time"]` |
+| `系统正常` | `["系统正常"]` | `[]` | `null` |
+
+### 3.2 TemplateCompiler - 模板预编译器
+
+加载时预编译模板，提取占位符位置。
+
+```java
+public final class TemplateCompiler {
+    
+    private static final char PLACEHOLDER_START = '{';
+    private static final char PLACEHOLDER_END = '}';
+    
+    public static CompiledTemplate compileSlf4j(String template) {
+        if (template == null || template.isEmpty()) {
+            return new CompiledTemplate(new String[]{""}, new int[0], null, "");
+        }
+        
+        List<String> fragments = new ArrayList<>();
+        List<Integer> indices = new ArrayList<>();
+        
+        StringBuilder currentFragment = new StringBuilder();
+        int index = 0;
+        
+        for (int i = 0; i < template.length(); i++) {
+            char c = template.charAt(i);
+            
+            if (c == PLACEHOLDER_START && i + 1 < template.length() 
+                && template.charAt(i + 1) == PLACEHOLDER_END) {
+                fragments.add(currentFragment.toString());
+                currentFragment.setLength(0);
+                indices.add(index++);
+                i++;
+            } else {
+                currentFragment.append(c);
+            }
+        }
+        fragments.add(currentFragment.toString());
+        
+        return new CompiledTemplate(
+            fragments.toArray(new String[0]),
+            indices.stream().mapToInt(Integer::intValue).toArray(),
+            null,
+            template
+        );
+    }
+    
+    public static CompiledTemplate compileNamed(String template) {
+        if (template == null || template.isEmpty()) {
+            return new CompiledTemplate(new String[]{""}, new int[0], new String[0], "");
+        }
+        
+        List<String> fragments = new ArrayList<>();
+        List<Integer> indices = new ArrayList<>();
+        List<String> names = new ArrayList<>();
+        
+        StringBuilder currentFragment = new StringBuilder();
+        int index = 0;
+        
+        for (int i = 0; i < template.length(); i++) {
+            char c = template.charAt(i);
+            
+            if (c == PLACEHOLDER_START) {
+                int endPos = findPlaceholderEnd(template, i);
+                if (endPos > i + 1) {
+                    fragments.add(currentFragment.toString());
+                    currentFragment.setLength(0);
+                    
+                    String paramName = template.substring(i + 1, endPos);
+                    names.add(paramName);
+                    indices.add(index++);
+                    i = endPos;
+                    continue;
+                }
+            }
+            currentFragment.append(c);
+        }
+        fragments.add(currentFragment.toString());
+        
+        return new CompiledTemplate(
+            fragments.toArray(new String[0]),
+            indices.stream().mapToInt(Integer::intValue).toArray(),
+            names.toArray(new String[0]),
+            template
+        );
+    }
+    
+    private static int findPlaceholderEnd(String template, int start) {
+        for (int i = start + 1; i < template.length(); i++) {
+            char c = template.charAt(i);
+            if (c == PLACEHOLDER_END) {
+                return i;
+            }
+            if (!isValidParamChar(c)) {
+                return -1;
+            }
+        }
+        return -1;
+    }
+    
+    private static boolean isValidParamChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '-';
+    }
+}
+```
+
+### 3.3 TemplateRenderer - 渲染执行器
+
+按预编译结构高效渲染，无需重新扫描模板。
+
+```java
+public final class TemplateRenderer {
+    
+    public static String render(CompiledTemplate compiled, Object[] args) {
+        if (!compiled.hasParams()) {
+            return compiled.getFragments()[0];
+        }
+        
+        String[] fragments = compiled.getFragments();
+        int[] indices = compiled.getParamIndices();
+        int paramCount = compiled.getParamCount();
+        
+        int estimatedSize = estimateSize(fragments, args, paramCount);
+        StringBuilder result = new StringBuilder(estimatedSize);
+        
+        for (int i = 0; i < fragments.length; i++) {
+            result.append(fragments[i]);
+            if (i < paramCount) {
+                int argIndex = indices[i];
+                if (argIndex < args.length && args[argIndex] != null) {
+                    result.append(args[argIndex]);
+                } else {
+                    result.append("{}");
+                }
+            }
+        }
+        
+        return result.toString();
+    }
+    
+    public static String renderNamed(CompiledTemplate compiled, Map<String, Object> namedArgs) {
+        if (!compiled.hasParams()) {
+            return compiled.getFragments()[0];
+        }
+        
+        String[] fragments = compiled.getFragments();
+        String[] paramNames = compiled.getParamNames();
+        int paramCount = compiled.getParamCount();
+        
+        int estimatedSize = estimateNamedSize(fragments, namedArgs, paramNames, paramCount);
+        StringBuilder result = new StringBuilder(estimatedSize);
+        
+        for (int i = 0; i < fragments.length; i++) {
+            result.append(fragments[i]);
+            if (i < paramCount) {
+                String paramName = paramNames[i];
+                Object value = namedArgs != null ? namedArgs.get(paramName) : null;
+                if (value != null) {
+                    result.append(value);
+                } else {
+                    result.append('{').append(paramName).append('}');
+                }
+            }
+        }
+        
+        return result.toString();
+    }
+    
+    private static int estimateSize(String[] fragments, Object[] args, int paramCount) {
+        int size = 0;
+        for (String f : fragments) {
+            size += f.length();
+        }
+        for (Object arg : args) {
+            size += arg != null ? String.valueOf(arg).length() : 2;
+        }
+        return size;
+    }
+    
+    private static int estimateNamedSize(String[] fragments, Map<String, Object> namedArgs,
+                                          String[] paramNames, int paramCount) {
+        int size = 0;
+        for (String f : fragments) {
+            size += f.length();
+        }
+        if (namedArgs != null) {
+            for (String name : paramNames) {
+                Object val = namedArgs.get(name);
+                size += val != null ? String.valueOf(val).length() : name.length() + 2;
+            }
+        }
+        return size;
+    }
+}
+```
+
+### 3.4 MsgTemplate - 核心类
+
+继承MultiLangDyEnum，存储预编译模板，提供静态API和Builder入口。
 
 ```java
 public class MsgTemplate extends MultiLangDyEnum {
     
     private static final long serialVersionUID = 1L;
     
-    private final Map<String, String> messagesSlf4j;
-    private final Map<String, String> messagesNamed;
-    
-    private static volatile MsgTemplateRenderer slf4jRenderer = new Slf4jStyleRenderer();
-    private static volatile MsgTemplateRenderer namedRenderer = new NamedStyleRenderer();
+    private final Map<String, CompiledTemplate> compiledSlf4j;
+    private final Map<String, CompiledTemplate> compiledNamed;
     
     protected MsgTemplate(String code, String name, int order,
-                          Map<String, String> messagesSlf4j,
-                          Map<String, String> messagesNamed) {
-        super(code, name, order, messagesNamed);
-        this.messagesSlf4j = messagesSlf4j;
-        this.messagesNamed = messagesNamed;
+                          Map<String, CompiledTemplate> compiledSlf4j,
+                          Map<String, CompiledTemplate> compiledNamed) {
+        super(code, name, order, Collections.emptyMap());
+        this.compiledSlf4j = compiledSlf4j;
+        this.compiledNamed = compiledNamed;
     }
     
     // ========== 静态API ==========
@@ -100,7 +339,7 @@ public class MsgTemplate extends MultiLangDyEnum {
     public static String get(String code, Locale locale, Object... args) {
         MsgTemplate template = EnumRegistry.valueOf(MsgTemplate.class, code)
             .orElseThrow(() -> new IllegalArgumentException("Template not found: " + code));
-        return template.renderSlf4j(locale, args);
+        return template.render(locale, args);
     }
     
     public static String getNamed(String code, Locale locale, Map<String, Object> namedArgs) {
@@ -133,22 +372,31 @@ public class MsgTemplate extends MultiLangDyEnum {
     
     // ========== 实例方法 ==========
     
-    public String renderSlf4j(Locale locale, Object... args) {
-        String template = getSlf4jTemplate(locale);
-        return slf4jRenderer.render(template, args);
+    public String render(Locale locale, Object... args) {
+        CompiledTemplate compiled = getCompiledSlf4j(locale);
+        return TemplateRenderer.render(compiled, args);
     }
     
     public String renderNamed(Locale locale, Map<String, Object> namedArgs) {
-        String template = getNamedTemplate(locale);
-        return namedRenderer.renderNamed(template, namedArgs);
+        CompiledTemplate compiled = getCompiledNamed(locale);
+        return TemplateRenderer.renderNamed(compiled, namedArgs);
     }
     
-    public String getSlf4jTemplate(Locale locale) {
-        return messagesSlf4j.getOrDefault(locale.getLanguage(), messagesSlf4j.get("en"));
+    public CompiledTemplate getCompiledSlf4j(Locale locale) {
+        return compiledSlf4j.getOrDefault(locale.getLanguage(), 
+            compiledSlf4j.getOrDefault("en", CompiledTemplate.EMPTY));
     }
     
-    public String getNamedTemplate(Locale locale) {
-        return messagesNamed.getOrDefault(locale.getLanguage(), messagesNamed.get("en"));
+    public CompiledTemplate getCompiledNamed(Locale locale) {
+        return compiledNamed.getOrDefault(locale.getLanguage(), 
+            compiledNamed.getOrDefault("en", CompiledTemplate.EMPTY));
+    }
+    
+    public Set<String> getSupportedLocales() {
+        Set<String> locales = new HashSet<>();
+        locales.addAll(compiledSlf4j.keySet());
+        locales.addAll(compiledNamed.keySet());
+        return locales;
     }
     
     // ========== 工厂方法 ==========
@@ -164,110 +412,18 @@ public class MsgTemplate extends MultiLangDyEnum {
         String nameEn = parts[1].trim();
         int order = Integer.parseInt(parts[6].trim());
         
-        Map<String, String> messagesSlf4j = new HashMap<>();
-        messagesSlf4j.put("zh", parts[2].trim());
-        messagesSlf4j.put("en", parts[3].trim());
+        Map<String, CompiledTemplate> compiledSlf4j = new HashMap<>();
+        compiledSlf4j.put("zh", TemplateCompiler.compileSlf4j(parts[2].trim()));
+        compiledSlf4j.put("en", TemplateCompiler.compileSlf4j(parts[3].trim()));
         
-        Map<String, String> messagesNamed = new HashMap<>();
-        messagesNamed.put("zh", parts[4].trim());
-        messagesNamed.put("en", parts[5].trim());
+        Map<String, CompiledTemplate> compiledNamed = new HashMap<>();
+        compiledNamed.put("zh", TemplateCompiler.compileNamed(parts[4].trim()));
+        compiledNamed.put("en", TemplateCompiler.compileNamed(parts[5].trim()));
         
-        return new MsgTemplate(code, nameZh + "/" + nameEn, order, messagesSlf4j, messagesNamed);
-    }
-    
-    // ========== 渲染器配置 ==========
-    
-    public static void setSlf4jRenderer(MsgTemplateRenderer renderer) {
-        slf4jRenderer = renderer;
-    }
-    
-    public static void setNamedRenderer(MsgTemplateRenderer renderer) {
-        namedRenderer = renderer;
-    }
-}
-```
-
-### 3.2 MsgTemplateRenderer
-
-渲染引擎接口。
-
-```java
-public interface MsgTemplateRenderer {
-    
-    String render(String template, Object[] args);
-    
-    String renderNamed(String template, Map<String, Object> namedArgs);
-}
-```
-
-### 3.3 Slf4jStyleRenderer
-
-{} 占位符风格渲染器。
-
-```java
-public class Slf4jStyleRenderer implements MsgTemplateRenderer {
-    
-    @Override
-    public String render(String template, Object[] args) {
-        if (template == null || args == null || args.length == 0) {
-            return template;
-        }
+        String displayName = nameZh.isEmpty() ? nameEn : 
+                             nameEn.isEmpty() ? nameZh : nameZh + "/" + nameEn;
         
-        StringBuilder result = new StringBuilder();
-        int argIndex = 0;
-        int i = 0;
-        
-        while (i < template.length()) {
-            if (i + 1 < template.length() && template.charAt(i) == '{' && template.charAt(i + 1) == '}') {
-                if (argIndex < args.length) {
-                    result.append(args[argIndex]);
-                    argIndex++;
-                } else {
-                    result.append("{}");
-                }
-                i += 2;
-            } else {
-                result.append(template.charAt(i));
-                i++;
-            }
-        }
-        
-        return result.toString();
-    }
-    
-    @Override
-    public String renderNamed(String template, Map<String, Object> namedArgs) {
-        throw new UnsupportedOperationException("Slf4jStyleRenderer does not support named args");
-    }
-}
-```
-
-### 3.4 NamedStyleRenderer
-
-{name} 占位符风格渲染器。
-
-```java
-public class NamedStyleRenderer implements MsgTemplateRenderer {
-    
-    @Override
-    public String render(String template, Object[] args) {
-        throw new UnsupportedOperationException("NamedStyleRenderer does not support positional args");
-    }
-    
-    @Override
-    public String renderNamed(String template, Map<String, Object> namedArgs) {
-        if (template == null || namedArgs == null || namedArgs.isEmpty()) {
-            return template;
-        }
-        
-        String result = template;
-        for (Map.Entry<String, Object> entry : namedArgs.entrySet()) {
-            String placeholder = "{" + entry.getKey() + "}";
-            String value = String.valueOf(entry.getValue());
-            result = result.replace(placeholder, value);
-        }
-        
-        return result;
+        return new MsgTemplate(code, displayName, order, compiledSlf4j, compiledNamed);
     }
 }
 ```
@@ -332,7 +488,7 @@ public class MsgTemplateBuilder {
         if (useNamed) {
             return template.renderNamed(locale, namedArgs);
         } else {
-            return template.renderSlf4j(locale, args);
+            return template.render(locale, args);
         }
     }
     
@@ -386,6 +542,9 @@ public class FileMsgTemplateLoader implements MsgTemplateLoader {
     public int load(Class<MsgTemplate> enumClass, BiFunction<String, String, MsgTemplate> factory) {
         Properties props = new Properties();
         try (InputStream is = getResourceAsStream(filePath)) {
+            if (is == null) {
+                throw new IOException("Template file not found: " + filePath);
+            }
             props.load(is);
             
             int count = 0;
@@ -448,69 +607,6 @@ public class PropMsgTemplateLoader implements MsgTemplateLoader {
 }
 ```
 
-### 4.4 DbMsgTemplateLoader
-
-数据库加载器（扩展点）。
-
-```java
-public class DbMsgTemplateLoader implements MsgTemplateLoader {
-    
-    private final DataSource dataSource;
-    private final String tableName;
-    
-    public DbMsgTemplateLoader(DataSource dataSource) {
-        this(dataSource, "msg_template");
-    }
-    
-    public DbMsgTemplateLoader(DataSource dataSource, String tableName) {
-        this.dataSource = dataSource;
-        this.tableName = tableName;
-    }
-    
-    @Override
-    public int load(Class<MsgTemplate> enumClass, BiFunction<String, String, MsgTemplate> factory) {
-        String sql = "SELECT code, name_zh, name_en, tpl_slf4j_zh, tpl_slf4j_en, " +
-                     "tpl_named_zh, tpl_named_en, order FROM " + tableName;
-        
-        int count = 0;
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql);
-             ResultSet rs = stmt.executeQuery()) {
-            
-            while (rs.next()) {
-                String code = rs.getString("code");
-                String valueString = buildValueString(rs);
-                MsgTemplate template = factory.apply(code, valueString);
-                EnumRegistry.register(enumClass, template);
-                count++;
-            }
-            return count;
-        } catch (SQLException e) {
-            throw new RuntimeException("Failed to load templates from database", e);
-        }
-    }
-    
-    private String buildValueString(ResultSet rs) throws SQLException {
-        return rs.getString("name_zh") + "|" +
-               rs.getString("name_en") + "|" +
-               rs.getString("tpl_slf4j_zh") + "|" +
-               rs.getString("tpl_slf4j_en") + "|" +
-               rs.getString("tpl_named_zh") + "|" +
-               rs.getString("tpl_named_en") + "|" +
-               rs.getInt("order");
-    }
-    
-    @Override
-    public boolean validateSource() {
-        try (Connection conn = dataSource.getConnection()) {
-            return conn.isValid(5);
-        } catch (SQLException e) {
-            return false;
-        }
-    }
-}
-```
-
 ---
 
 ## 5. 配置文件格式
@@ -540,13 +636,13 @@ LOG_002=操作日志|Operation log|用户{}执行了{}操作|User {} performed {
 支持扩展更多语言：
 
 ```properties
-# 扩展葡萄牙语、俄语
+# 扩展葡萄牙语、俄语（可选段）
 SYS_ERR_001=系统错误|System error|系统内部错误:{}|Internal system error:{}|系统内部错误:{reason}|Internal system error:{reason}|pt:Erro interno:{}|pt:Erro interno:{reason}|ru:Внутренняя ошибка:{}|ru:Внутренняя ошибка:{reason}|1
 ```
 
 扩展格式解析规则：
-- 基础6段后，可选添加语言扩展：`langCode:template` 格式
-- 解析时检测扩展语言并加入对应Map
+- 基础7段后，可选添加语言扩展：`langCode:slf4j_tpl|langCode:named_tpl` 成对格式
+- 解析时检测扩展语言并编译加入对应Map
 
 ---
 
@@ -555,7 +651,6 @@ SYS_ERR_001=系统错误|System error|系统内部错误:{}|Internal system erro
 ### 6.1 初始化
 
 ```java
-// 应用启动时加载模板
 public class AppInitializer {
     public void init() {
         FileMsgTemplateLoader loader = new FileMsgTemplateLoader("msg_templates.properties");
@@ -567,14 +662,12 @@ public class AppInitializer {
 ### 6.2 静态方法调用
 
 ```java
-// {}风格参数
 String msg = MsgTemplate.get("SYS_ERR_001", Locale.CHINA, "数据库连接超时");
 // 输出：系统内部错误：数据库连接超时
 
 String msgEn = MsgTemplate.getEn("SYS_ERR_002", "email");
 // 输出：Parameter email validation failed
 
-// {name}风格参数
 Map<String, Object> args = new HashMap<>();
 args.put("userId", "admin");
 args.put("resource", "/admin/dashboard");
@@ -585,7 +678,6 @@ String msg = MsgTemplate.getNamed("SYS_ERR_003", Locale.CHINA, args);
 ### 6.3 Builder模式调用
 
 ```java
-// {}风格
 String msg = MsgTemplate.builder()
     .code("LOG_001")
     .locale(Locale.CHINA)
@@ -593,7 +685,6 @@ String msg = MsgTemplate.builder()
     .render();
 // 输出：用户admin于2024-04-17 10:30:00登录成功
 
-// {name}风格
 String msg = MsgTemplate.builder()
     .code("LOG_002")
     .locale(Locale.US)
@@ -602,133 +693,99 @@ String msg = MsgTemplate.builder()
     .render();
 // 输出：User john performed delete operation
 
-// 快捷方法
 String msgZh = MsgTemplate.builder()
     .code("BIZ_ERR_001")
     .namedArg("orderId", "ORD-12345")
     .renderZh();
 ```
 
-### 6.4 自定义渲染器
-
-```java
-// 替换默认渲染器
-MsgTemplate.setSlf4jRenderer(new CustomSlf4jRenderer());
-MsgTemplate.setNamedRenderer(new CustomNamedRenderer());
-
-// 自定义渲染器实现
-public class CustomNamedRenderer implements MsgTemplateRenderer {
-    @Override
-    public String renderNamed(String template, Map<String, Object> namedArgs) {
-        // 支持嵌套占位符、条件渲染等高级特性
-        return processTemplate(template, namedArgs);
-    }
-}
-```
-
 ---
 
-## 7. 数据库表设计（可选扩展）
+## 7. 测试策略
 
-```sql
-CREATE TABLE msg_template (
-    code VARCHAR(50) PRIMARY KEY,
-    name_zh VARCHAR(100),
-    name_en VARCHAR(100),
-    tpl_slf4j_zh VARCHAR(500),
-    tpl_slf4j_en VARCHAR(500),
-    tpl_named_zh VARCHAR(500),
-    tpl_named_en VARCHAR(500),
-    order INT DEFAULT 0,
-    category VARCHAR(20),
-    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-);
-
--- 扩展多语言表
-CREATE TABLE msg_template_locale (
-    template_code VARCHAR(50),
-    locale VARCHAR(10),
-    tpl_slf4j VARCHAR(500),
-    tpl_named VARCHAR(500),
-    PRIMARY KEY (template_code, locale)
-);
-```
-
----
-
-## 8. 测试策略
-
-### 8.1 单元测试
+### 7.1 单元测试
 
 | 测试类 | 测试范围 |
 |--------|----------|
-| MsgTemplateTest | 核心类功能：静态方法、实例方法、工厂方法 |
-| Slf4jStyleRendererTest | {}风格渲染：空参数、多参数、占位符位置 |
-| NamedStyleRendererTest | {name}风格渲染：单参数、多参数、缺失参数 |
-| MsgTemplateBuilderTest | Builder模式：完整链式调用、缺失参数校验 |
+| CompiledTemplateTest | 预编译结构：数据存储、序列化 |
+| TemplateCompilerTest | 预编译器：{}解析、{name}解析、边界情况 |
+| TemplateRendererTest | 渲染器：按位置填充、按名称填充、空参数 |
+| MsgTemplateTest | 核心类：静态方法、实例方法、工厂方法 |
+| MsgTemplateBuilderTest | Builder模式：链式调用、参数校验 |
 | FileMsgTemplateLoaderTest | 文件加载：正常加载、格式错误、文件缺失 |
-| DbMsgTemplateLoaderTest | 数据库加载：模拟数据源、SQL执行 |
+| PropMsgTemplateLoaderTest | Properties加载：内存加载、空Properties |
 
-### 8.2 集成测试
+### 7.2 性能测试
 
 ```java
 @Test
-public void testFullWorkflow() {
-    // 加载
-    FileMsgTemplateLoader loader = new FileMsgTemplateLoader("test_templates.properties");
-    loader.load(MsgTemplate.class, MsgTemplate::fromValueString);
+public void testRenderPerformance() {
+    CompiledTemplate compiled = TemplateCompiler.compileNamed(
+        "用户{userId}于{time}在{location}执行了{action}操作，结果：{result}");
     
-    // 验证注册
-    assertTrue(EnumRegistry.contains(MsgTemplate.class, "TEST_001"));
+    Map<String, Object> args = new HashMap<>();
+    args.put("userId", "admin");
+    args.put("time", "2024-04-17");
+    args.put("location", "server1");
+    args.put("action", "login");
+    args.put("result", "success");
     
-    // 验证渲染
-    MsgTemplate template = EnumRegistry.valueOf(MsgTemplate.class, "TEST_001").get();
-    assertEquals("测试消息:test", template.renderSlf4j(Locale.CHINA, "test"));
+    long start = System.nanoTime();
+    for (int i = 0; i < 100000; i++) {
+        TemplateRenderer.renderNamed(compiled, args);
+    }
+    long elapsed = System.nanoTime() - start;
+    
+    System.out.println("100K renders: " + elapsed / 1_000_000 + "ms");
 }
 ```
 
 ---
 
-## 9. 性能考虑
+## 8. 性能分析
 
-### 9.1 内存结构
+### 8.1 预编译优势
 
-- 每个MsgTemplate实例存储两个Map（messagesSlf4j、messagesNamed）
-- 典型场景：100个模板 * 4种语言 * 2种风格 ≈ 800条消息文本
-- 内存占用预估：100KB以内
+| 操作 | 传统方式 | 预编译方式 |
+|------|---------|-----------|
+| 编译时机 | 每次渲染时扫描 | 加载时一次性编译 |
+| 渲染扫描 | O(template.length) | O(0) - 无扫描 |
+| 参数填充 | 动态查找位置 | 直接按索引填充 |
+| 内存占用 | 存原始字符串 | 存fragments数组 |
 
-### 9.2 渲染性能
+### 8.2 渲染性能
 
-- SLF4J风格：线性扫描模板，O(n)复杂度
-- Named风格：Map遍历替换，O(m)复杂度（m=参数数量）
-- 无正则表达式，性能优于MessageFormat
+- **SLF4J风格**：O(fragments.length + args.length)，约O(n+m)
+- **Named风格**：O(fragments.length + paramNames.length)，约O(n+m)
+- **无正则表达式**：避免Pattern.compile开销
+- **StringBuilder预分配**：estimateSize避免多次扩容
 
-### 9.3 线程安全
+### 8.3 内存结构
 
-- MsgTemplate实例不可变（final字段）
+- CompiledTemplate：1个模板 ≈ fragments数组 + indices数组 + names数组
+- 典型场景：100模板 * 4语言 * 2风格 = 800个CompiledTemplate
+- 内存预估：每个CompiledTemplate ≈ 200字节，总计 ≈ 160KB
+
+### 8.4 线程安全
+
+- CompiledTemplate不可变（final字段）
+- MsgTemplate不可变（final字段）
 - EnumRegistry基于ConcurrentHashMap
-- 渲染器可替换（volatile变量），无锁竞争
+- 无锁竞争，适合高并发场景
 
 ---
 
-## 10. 扩展点
+## 9. 扩展点
 
-### 10.1 自定义加载器
+### 9.1 自定义加载器
 
-实现MsgTemplateLoader接口，支持任意数据源：
+实现MsgTemplateLoader接口，支持其他数据源：
 - YAML文件
 - Redis缓存
 - 远程配置中心（Apollo、Nacos）
+- 数据库（用户自行实现DbMsgTemplateLoader）
 
-### 10.2 自定义渲染器
-
-实现MsgTemplateRenderer接口，支持高级特性：
-- 条件渲染：`{if:condition}content{endif}`
-- 循环渲染：`{for:item in list}item.name{endfor}`
-- 国际化格式化：数字、日期、货币格式
-
-### 10.3 预定义模板子类
+### 9.2 预定义模板子类
 
 继承MsgTemplate创建领域专用模板：
 - ErrorCode（错误码）- 添加HTTP状态码、错误级别
@@ -737,11 +794,11 @@ public void testFullWorkflow() {
 
 ---
 
-## 11. 与dyenums的关系
+## 10. 与dyenums的关系
 
 | dyenums提供 | jmsg-i18n扩展 |
 |-------------|---------------|
-| MultiLangDyEnum基类 | MsgTemplate继承并扩展双模板存储 |
+| MultiLangDyEnum基类 | MsgTemplate继承，替换messages为预编译模板 |
 | EnumRegistry注册表 | 直接使用，无修改 |
 | DyEnumsLoader接口 | MsgTemplateLoader继承，实现模板专用加载 |
 | BaseDyEnum功能 | 通过继承链间接复用 |
@@ -751,9 +808,10 @@ jmsg-i18n作为dyenums的扩展库，遵循dyenums的设计原则：
 - 线程安全
 - 不可变实例
 - 可扩展加载器
+- 预编译高性能
 
 ---
 
-## 12. 实现计划
+## 11. 实现计划
 
 详见后续实现计划文档（由writing-plans skill生成）。
