@@ -1,5 +1,6 @@
 package cn.itcraft.jmsg.core;
 
+import cn.itcraft.jmsg.util.LocaleHelper;
 import java.util.Locale;
 
 public final class MsgTemplateConfig {
@@ -24,18 +25,7 @@ public final class MsgTemplateConfig {
     
     public static void setDefaultLocale(String localeCode) {
         if (localeCode != null) {
-            defaultLocale = parseLocale(localeCode);
-        }
-    }
-    
-    private static Locale parseLocale(String localeCode) {
-        String[] parts = localeCode.replace("-", "_").split("_");
-        if (parts.length == 1) {
-            return new Locale(parts[0]);
-        } else if (parts.length == 2) {
-            return new Locale(parts[0], parts[1]);
-        } else {
-            return new Locale(parts[0], parts[1], parts[2]);
+            defaultLocale = LocaleHelper.parse(localeCode);
         }
     }
     
