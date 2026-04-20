@@ -37,6 +37,16 @@ public class JMessageSampleTest {
         // 结果: "内部错误:数据库超时"
         LOGGER.info("i18n msg: {}", msg);
 
+        // 指定Locale
+        msg = MsgTemplateBuilder.create()
+                                .code("ERR_001")
+                                .locale(Locale.US)
+                                .simple()
+                                .args("timeout")
+                                .render();
+        // 结果: "Internal error:timeout"
+        LOGGER.info("i18n msg: {}", msg);
+
         // Named风格 - Map参数
         Map<String, Object> params = new HashMap<>();
         params.put("userId", "admin");
@@ -60,16 +70,6 @@ public class JMessageSampleTest {
                                 .named()
                                 .bean(event)
                                 .render();
-        LOGGER.info("i18n msg: {}", msg);
-
-        // 指定Locale
-        msg = MsgTemplateBuilder.create()
-                                .code("ERR_001")
-                                .locale(Locale.US)
-                                .simple()
-                                .args("timeout")
-                                .render();
-        // 结果: "Internal error:timeout"
         LOGGER.info("i18n msg: {}", msg);
     }
 
