@@ -2,15 +2,15 @@
 
 [中文文档](README_cn.md) | English
 
-A high-performance multi-language message template system for Java, supporting both `{}` (Simple) and `{name}` (Named) placeholder styles.
+A high-performance multi-language message template system for Java, supporting both `{}` (Simple) and `{name}` (Named) placeholder styles with unlimited locale support.
 
 ## Features
 
 - **Dual Template Styles**: Support positional `{}` and named `{name}` placeholders
-- **Multi-language Support**: Built-in Chinese/English template storage with Locale fallback
+- **Unlimited Locales**: YAML configuration supports any number of languages (zh-CN, en-US, en-GB, ja-JP, etc.)
 - **High Performance**: Pre-compiled templates with StringBuilder pooling
 - **ReflectCache**: 10x faster getter method caching for Bean rendering
-- **Flexible Loading**: File and Properties loaders, extensible for database sources
+- **Flexible Loading**: YAML loader with locale fallback chain
 - **Builder Pattern**: Fluent API for easy template rendering
 
 ## Performance
@@ -38,20 +38,46 @@ JMH Benchmark Results (JDK 25, 4 threads):
 <dependency>
     <groupId>cn.itcraft</groupId>
     <artifactId>jmsg-i18n</artifactId>
-    <version>1.0.0</version>
+    <version>1.2.0</version>
 </dependency>
 ```
 
-### Template Properties File
+### Template YAML File
 
-```properties
-# templates_simple.properties ({} style)
-ERR_001=Error|Error|Internal error:{}|Internal error:{}|1
-LOG_001=Login|Login|User {} logged in at {}|User {} logged in at {}|10
+```yaml
+# templates_simple.yaml ({} style)
+templates:
+  ERR_001:
+    order: 1
+    default: zh-CN
+    messages:
+      zh-CN: 内部错误:{}
+      en-US: Internal error:{}
+      en-GB: Internal error:{}
+  
+  LOG_001:
+    order: 10
+    default: zh-CN
+    messages:
+      zh-CN: 用户{}于{}登录
+      en-US: User {} logged in at {}
 
-# templates_named.properties ({name} style)
-ERR_001=Error|Error|Internal error:{reason}|Internal error:{reason}|1
-LOG_001=Login|Login|User {userId} logged in at {time}|User {userId} logged in at {time}|10
+# templates_named.yaml ({name} style)
+templates:
+  ERR_001:
+    order: 1
+    default: zh-CN
+    messages:
+      zh-CN: 内部错误:{reason}
+      en-US: Internal error:{reason}
+      en-GB: Internal error:{reason}
+  
+  LOG_001:
+    order: 10
+    default: zh-CN
+    messages:
+      zh-CN: 用户{userId}于{time}登录
+      en-US: User {userId} logged in at {time}
 ```
 
 ### Usage Examples
@@ -60,23 +86,23 @@ LOG_001=Login|Login|User {userId} logged in at {time}|User {userId} logged in at
 import cn.itcraft.jmsg.core.MsgTemplate;
 import cn.itcraft.jmsg.core.MsgTemplateConfig;
 import cn.itcraft.jmsg.builder.MsgTemplateBuilder;
-import cn.itcraft.jmsg.loader.FileMsgTemplateLoader;
+import cn.itcraft.jmsg.loader.YamlMsgTemplateLoader;
 import java.util.Locale;
 import java.util.Map;
 import java.util.HashMap;
 
 // Initialize
 MsgTemplateConfig.setDefaultLocale(Locale.CHINA);
-FileMsgTemplateLoader.forSimple("templates_simple.properties").load(MsgTemplate.class, null);
-FileMsgTemplateLoader.forNamed("templates_named.properties").load(MsgTemplate.class, null);
+YamlMsgTemplateLoader.forSimple("templates_simple.yaml").load(MsgTemplate.class, null);
+YamlMsgTemplateLoader.forNamed("templates_named.yaml").load(MsgTemplate.class, null);
 
 // Simple style - {} placeholders
 String msg = MsgTemplateBuilder.create()
     .code("ERR_001")
     .simple()
-    .args("Database timeout")
+    .args("数据库超时")
     .render();
-// Result: "Internal error:Database timeout"
+// Result: "内部错误:数据库超时"
 
 // Named style - Map arguments
 Map<String, Object> args = new HashMap<>();
@@ -88,7 +114,7 @@ String msg = MsgTemplateBuilder.create()
     .named()
     .args(args)
     .render();
-// Result: "User admin logged in at 2024-04-17"
+// Result: "用户admin于2024-04-17登录"
 
 // Named style - Bean arguments (with ReflectCache)
 LoginEvent event = new LoginEvent();
@@ -105,6 +131,15 @@ String msg = MsgTemplateBuilder.create()
 String msg = MsgTemplateBuilder.create()
     .code("ERR_001")
     .locale(Locale.US)
+    .simple()
+    .args("timeout")
+    .render();
+// Result: "Internal error:timeout"
+
+// Locale fallback: zh -> zh-CN, en -> en-US, no match -> default locale
+String msg = MsgTemplateBuilder.create()
+    .code("ERR_001")
+    .locale(Locale.UK)  // Matches en-GB template
     .simple()
     .args("timeout")
     .render();
@@ -126,11 +161,10 @@ jmsg-i18n/
 ├── util/
 │   ├── StringBuilderPool.java    # ThreadLocal StringBuilder pooling
 │   ├── ReflectCache.java         # Getter method caching
-│   └ LocaleHelper.java           # Locale parsing utility
+│   └ LocaleHelper.java           # Locale parsing (zh-CN/zh_CN)
 ├── loader/
 │   ├── MsgTemplateLoader.java    # Interface (extends DyEnumsLoader)
-│   ├── FileMsgTemplateLoader.java# File properties loader
-│   └ PropMsgTemplateLoader.java  # In-memory Properties loader
+│   └ YamlMsgTemplateLoader.java  # YAML template loader
 └── builder/
     ├── MsgTemplateBuilder.java   # Entry point builder
     ├── SimpleBuilder.java        # Simple style builder
@@ -142,7 +176,7 @@ jmsg-i18n/
 ```java
 // Set default locale
 MsgTemplateConfig.setDefaultLocale(Locale.CHINA);
-MsgTemplateConfig.setDefaultLocale("en-US");  // String format
+MsgTemplateConfig.setDefaultLocale("zh-CN");  // String format (supports zh-CN and zh_CN)
 
 // Configure ReflectCache
 MsgTemplateConfig.setReflectCacheEnabled(true);  // Enable by default
@@ -154,18 +188,26 @@ MsgTemplateConfig.reset();
 
 ## Template Format
 
-Properties file format: `name_zh|name_en|template_zh|template_en|order`
+YAML format with unlimited locale support:
 
-```properties
-# Example
-CODE_001=名称|Name|模板{param}|Template {param}|1
+```yaml
+templates:
+  CODE_001:
+    order: 1                    # Display order (optional, default 0)
+    default: zh-CN              # Default locale (required)
+    messages:
+      zh-CN: 模板{param}        # Locale → template mapping
+      en-US: Template {param}
+      en-GB: Template {param}
+      ja-JP: テンプレート{param}
 ```
 
-- `name_zh`: Chinese display name
-- `name_en`: English display name  
-- `template_zh`: Chinese template with placeholders
-- `template_en`: English template with placeholders
-- `order`: Display order (integer)
+**Locale format**: Supports both `zh-CN` (hyphen) and `zh_CN` (underscore)
+
+**Locale fallback**:
+1. Exact match: `zh-CN` → `zh-CN` template
+2. Language match: `zh` → `zh-CN` or `zh_CN` template
+3. Default: No match → `default` locale template
 
 ## Benchmark
 
@@ -182,7 +224,8 @@ mvn clean compile test-compile
 
 ## Dependencies
 
-Built on [dyenums](https://github.com/itcraft-cn/dyenums) dynamic enum framework.
+- Built on [dyenums](https://github.com/itcraft-cn/dyenums) dynamic enum framework
+- Uses [SnakeYAML](https://bitbucket.org/snakeyaml/snakeyaml) 2.2 for YAML parsing
 
 ## License
 

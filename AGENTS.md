@@ -1,12 +1,12 @@
 # jmsg-i18n
 
-高性能多语言消息模板系统，基于 dyenums，支持 `{}` 和 `{name}` 双占位符风格。
+高性能多语言消息模板系统，基于 dyenums，支持 `{}` 和 `{name}` 双占位符风格，YAML 配置支持无限语言。
 
 ## 项目信息
 
 - **Java**: 8+ (测试 JDK 25)
 - **构建**: Maven / mvnd (首选 mvnd)
-- **依赖**: dyenums-core, dyenums-loader-file (各 1.0.0)
+- **依赖**: dyenums-core, dyenums-loader-file, snakeyaml 2.2
 - **测试**: JUnit 4 + Mockito + PowerMock + JMH 1.37
 
 ## 常用命令
@@ -17,7 +17,7 @@ mvnd clean compile -q
 
 # 测试
 mvn test -q
-mvn test -Dtest=MsgTemplateIntegrationTest -q
+mvn test -Dtest=YamlMsgTemplateLoaderTest -q
 
 # 打包
 mvn clean package -DskipTests -q
@@ -33,18 +33,28 @@ mvn clean package -DskipTests -q
 src/main/java/cn/itcraft/jmsg/
 ├── core/          # MsgTemplate接口、编译器、渲染器
 ├── util/          # StringBuilderPool、ReflectCache、LocaleHelper
-├── loader/        # File/Prop MsgTemplateLoader
+├── loader/        # YamlMsgTemplateLoader
 └── builder/       # MsgTemplateBuilder入口
 ```
 
 ## 模板格式
 
-Properties 格式: `name_zh|name_en|template_zh|template_en|order`
+YAML 格式，支持无限语言：
 
-```properties
-ERR_001=错误|Error|内部错误:{}|Internal error:{}|1
-LOG_001=登录|Login|用户 {userId} 登录|User {userId} logged in|10
+```yaml
+templates:
+  ERR_001:
+    order: 1
+    default: zh-CN
+    messages:
+      zh-CN: 内部错误:{}
+      en-US: Internal error:{}
+      en-GB: Internal error:{}
 ```
+
+**Locale 格式**: 支持 `zh-CN` 和 `zh_CN`
+
+**Locale 回退**: 精确匹配 → 语言匹配 → 默认
 
 ## 性能要点
 

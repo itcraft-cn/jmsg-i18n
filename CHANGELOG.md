@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-04-20
+
+### Added
+
+- YAML template configuration format supporting unlimited locales
+- YamlMsgTemplateLoader for YAML file parsing
+- LocaleHelper support for both zh-CN and zh_CN formats
+- MsgTemplate.hasLocale() and getDefaultLocale() methods
+- Locale fallback chain: exact match → language match → default locale
+
+### Changed
+
+- Template format changed from Properties to YAML
+- Locale matching improved with language-level fallback
+
+### Removed
+
+- FileMsgTemplateLoader (use YamlMsgTemplateLoader)
+- PropMsgTemplateLoader (use YamlMsgTemplateLoader)
+- Properties template format support
+- fromValueString methods in SimpleMsgTemplate/NamedMsgTemplate
+
+### Dependencies
+
+- Added snakeyaml 2.2
+
 ## [1.1.0] - 2026-04-20
 
 ### Fixed
