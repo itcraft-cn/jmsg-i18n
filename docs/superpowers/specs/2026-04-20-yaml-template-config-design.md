@@ -105,19 +105,22 @@ YamlMsgTemplateLoader.forNamed("templates_named.yaml")
     .load(MsgTemplate.class, null);
 ```
 
-### 保留 FileMsgTemplateLoader（废弃）
+### 删除旧 Loader
 
-`FileMsgTemplateLoader` 标记为 `@Deprecated`，建议使用 `YamlMsgTemplateLoader`。
+- **删除** `FileMsgTemplateLoader`
+- **删除** `PropMsgTemplateLoader`
+- **保留** `MsgTemplateLoader` 接口，供用户自定义实现
 
-### 保留 PropMsgTemplateLoader
-
-内存 Properties 加载器，用于动态构建场景：
+### 自定义 Loader 示例
 
 ```java
-PropMsgTemplateLoader loader = new PropMsgTemplateLoader(MsgTemplate.Style.NAMED);
-loader.addTemplate("ERR_001", "zh-CN", "内部错误:{reason}");
-loader.addTemplate("ERR_001", "en-US", "Internal error:{reason}");
-loader.load(MsgTemplate.class, null);
+public class MyDbMsgTemplateLoader implements MsgTemplateLoader {
+    @Override
+    public int load(Class<MsgTemplate> enumClass, BiFunction<String, String, MsgTemplate> factory) {
+        // 从数据库加载模板
+        // ...
+    }
+}
 ```
 
 ## 数据结构变更
@@ -152,9 +155,10 @@ loader.load(MsgTemplate.class, null);
 
 1. 新增 `snakeyaml` 依赖
 2. 新增 `YamlMsgTemplateLoader`
-3. 修改 `CompiledTemplate` 支持 Locale 映射
-4. 修改 `MsgTemplate` 接口新增 Locale 相关方法
-5. 修改 `SimpleMsgTemplate`/`NamedMsgTemplate` 实现
-6. 废弃 `FileMsgTemplateLoader`
-7. 扩展 `PropMsgTemplateLoader` 支持多 Locale
-8. 更新文档和示例
+3. 删除 `FileMsgTemplateLoader`、`PropMsgTemplateLoader`
+4. 修改 `CompiledTemplate` 支持 Locale 映射
+5. 修改 `MsgTemplate` 接口新增 Locale 相关方法
+6. 修改 `SimpleMsgTemplate`/`NamedMsgTemplate` 实现
+7. 清理废弃代码和测试
+8. 更新 README、README_cn、AGENTS.md、CHANGELOG
+9. 更新示例和模板文件
