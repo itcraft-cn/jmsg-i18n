@@ -1,0 +1,15 @@
+templates:
+  ERR_001:
+    order: 1
+    default: zh-CN
+    messages:
+      zh-CN: 内部错误:{reason}
+      en-US: Internal error:{reason}
+      en-GB: Internal error:{reason}
+  
+  LOG_001:
+    order: 10
+    default: zh-CN
+    messages:
+      zh-CN: 用户{userId}于{time}登录
+      en-US: User {userId} logged in at {time}
