@@ -36,6 +36,22 @@ public final class LocaleHelper {
         }
     }
     
+    public static String toHyphen(Locale locale) {
+        if (locale == null) return null;
+        String lang = locale.getLanguage();
+        String country = locale.getCountry();
+        if (country.isEmpty()) return lang;
+        return lang + "-" + country;
+    }
+    
+    public static String toUnderscore(Locale locale) {
+        if (locale == null) return null;
+        String lang = locale.getLanguage();
+        String country = locale.getCountry();
+        if (country.isEmpty()) return lang;
+        return lang + "_" + country;
+    }
+    
     private static boolean isValidLanguageCode(String code) {
         if (code.length() < 2 || code.length() > 3) {
             return false;
