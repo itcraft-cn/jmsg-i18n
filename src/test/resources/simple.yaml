@@ -1,0 +1,7 @@
+templates:
+  ERR_001:
+    order: 1
+    default: zh-CN
+    messages:
+      zh-CN: 内部错误:{}
+      en-US: Internal error:{}

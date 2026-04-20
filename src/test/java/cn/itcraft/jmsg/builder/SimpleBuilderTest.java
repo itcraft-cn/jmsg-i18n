@@ -3,8 +3,7 @@ package cn.itcraft.jmsg.builder;
 import cn.itcraft.dyenums.core.EnumRegistry;
 import cn.itcraft.jmsg.core.MsgTemplate;
 import cn.itcraft.jmsg.core.MsgTemplateConfig;
-import cn.itcraft.jmsg.core.SimpleMsgTemplate;
-import cn.itcraft.jmsg.loader.FileMsgTemplateLoader;
+import cn.itcraft.jmsg.loader.YamlMsgTemplateLoader;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -16,7 +15,7 @@ public class SimpleBuilderTest {
     @Before
     public void setUp() {
         MsgTemplateConfig.setDefaultLocale(Locale.CHINA);
-        FileMsgTemplateLoader.forSimple("msg_templates_simple.properties")
+        YamlMsgTemplateLoader.forSimple("msg_templates_simple.yaml")
             .load(MsgTemplate.class, null);
     }
     

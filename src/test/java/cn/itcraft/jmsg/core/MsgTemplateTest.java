@@ -2,6 +2,7 @@ package cn.itcraft.jmsg.core;
 
 import org.junit.Test;
 import java.util.Locale;
+import java.util.Set;
 import static org.junit.Assert.*;
 
 public class MsgTemplateTest {
@@ -23,6 +24,8 @@ public class MsgTemplateTest {
         assertEquals("Test Template", template.getName());
         assertNotNull(template.getStyle());
         assertNotNull(template.getLocale());
+        assertNotNull(template.getDefaultLocale());
+        assertTrue(template.hasLocale(Locale.CHINA));
     }
     
     private static class MockMsgTemplate implements MsgTemplate {
@@ -42,6 +45,9 @@ public class MsgTemplateTest {
         public Locale getLocale() { return Locale.getDefault(); }
         
         @Override
+        public Locale getDefaultLocale() { return Locale.CHINA; }
+        
+        @Override
         public MsgTemplate.Style getStyle() { return MsgTemplate.Style.SIMPLE; }
         
         @Override
@@ -49,5 +55,11 @@ public class MsgTemplateTest {
         
         @Override
         public String render(Object... args) { return ""; }
+        
+        @Override
+        public Set<String> getSupportedLocales() { return java.util.Collections.singleton("zh_CN"); }
+        
+        @Override
+        public boolean hasLocale(Locale locale) { return locale.equals(Locale.CHINA); }
     }
 }

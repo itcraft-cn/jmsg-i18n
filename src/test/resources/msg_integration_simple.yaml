@@ -1,0 +1,35 @@
+templates:
+  SYS_ERR_001:
+    order: 1
+    default: zh-CN
+    messages:
+      zh-CN: 系统内部错误:{}
+      en-US: Internal system error:{}
+  
+  SYS_ERR_002:
+    order: 2
+    default: zh-CN
+    messages:
+      zh-CN: 参数{}验证失败
+      en-US: Parameter {} validation failed
+  
+  LOG_001:
+    order: 10
+    default: zh-CN
+    messages:
+      zh-CN: 用户{}于{}登录成功
+      en-US: User {} logged in at {}
+  
+  LOG_002:
+    order: 11
+    default: zh-CN
+    messages:
+      zh-CN: 用户{}执行了{}操作
+      en-US: User {} performed {} operation
+  
+  BIZ_ERR_001:
+    order: 20
+    default: zh-CN
+    messages:
+      zh-CN: 订单{}创建失败
+      en-US: Order {} creation failed

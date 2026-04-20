@@ -4,9 +4,7 @@ import cn.itcraft.dyenums.core.EnumRegistry;
 import cn.itcraft.jmsg.builder.MsgTemplateBuilder;
 import cn.itcraft.jmsg.core.MsgTemplate;
 import cn.itcraft.jmsg.core.MsgTemplateConfig;
-import cn.itcraft.jmsg.core.SimpleMsgTemplate;
-import cn.itcraft.jmsg.core.NamedMsgTemplate;
-import cn.itcraft.jmsg.loader.FileMsgTemplateLoader;
+import cn.itcraft.jmsg.loader.YamlMsgTemplateLoader;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -22,9 +20,9 @@ public class MsgTemplateIntegrationTest {
         MsgTemplateConfig.setDefaultLocale(Locale.CHINA);
         MsgTemplateConfig.setReflectCacheEnabled(true);
         
-        FileMsgTemplateLoader.forSimple("msg_integration_simple.properties")
+        YamlMsgTemplateLoader.forSimple("msg_integration_simple.yaml")
             .load(MsgTemplate.class, null);
-        FileMsgTemplateLoader.forNamed("msg_integration_named.properties")
+        YamlMsgTemplateLoader.forNamed("msg_integration_named.yaml")
             .load(MsgTemplate.class, null);
     }
     

@@ -38,14 +38,19 @@ public class MsgTemplateBenchmark {
         MsgTemplateConfig.setReflectCacheEnabled(true);
         ReflectCache.clear();
         
-        simpleTemplate = SimpleMsgTemplate.fromValueString(
-            "TEST", "测试|Test|用户{}于{}登录|User {} logged in at {}|1");
+        simpleCompiled = TemplateCompiler.compileSimple("用户{}于{}登录");
+        namedCompiled = TemplateCompiler.compileNamed("用户{userId}于{time}登录");
         
-        namedTemplate = NamedMsgTemplate.fromValueString(
-            "TEST", "测试|Test|用户{userId}于{time}登录|User {userId} logged in at {time}|1");
+        Map<String, CompiledTemplate> simpleCompiledMap = new HashMap<>();
+        simpleCompiledMap.put("zh_CN", simpleCompiled);
+        simpleCompiledMap.put("en_US", TemplateCompiler.compileSimple("User {} logged in at {}"));
         
-        simpleCompiled = TemplateCompiler.compileSimple("用户{}于{}登录成功");
-        namedCompiled = TemplateCompiler.compileNamed("用户{userId}于{time}登录成功");
+        Map<String, CompiledTemplate> namedCompiledMap = new HashMap<>();
+        namedCompiledMap.put("zh_CN", namedCompiled);
+        namedCompiledMap.put("en_US", TemplateCompiler.compileNamed("User {userId} logged in at {time}"));
+        
+        simpleTemplate = new SimpleMsgTemplate("TEST", "测试", "", 1, Locale.CHINA, simpleCompiledMap);
+        namedTemplate = new NamedMsgTemplate("TEST", "测试", "", 1, Locale.CHINA, namedCompiledMap);
         
         simpleArgs = new Object[]{"admin", "2024-04-17"};
         

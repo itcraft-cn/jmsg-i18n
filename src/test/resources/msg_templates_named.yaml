@@ -1,0 +1,14 @@
+templates:
+  TEST_001:
+    order: 1
+    default: zh-CN
+    messages:
+      zh-CN: 中文:{name}
+      en-US: English:{name}
+  
+  TEST_002:
+    order: 2
+    default: zh-CN
+    messages:
+      zh-CN: 用户{userId}于{time}登录
+      en-US: User {userId} logged in at {time}
