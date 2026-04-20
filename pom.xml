@@ -6,7 +6,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>cn.itcraft</groupId>
     <artifactId>jmsg-i18n</artifactId>
-    <version>1.2.0-dev</version><!-- managed by updgitver -->
+    <version>1.2.0</version><!-- managed by updgitver -->
     <packaging>jar</packaging>
     
     <name>jmsg-i18n</name>
