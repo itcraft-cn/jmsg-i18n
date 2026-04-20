@@ -95,12 +95,12 @@ public final class ReflectCache {
     
     private static Method tryGetMethod(Class<?> clazz, String methodName) {
         try {
-            return clazz.getMethod(methodName);
+            Method method = clazz.getDeclaredMethod(methodName);
+            method.setAccessible(true);
+            return method;
         } catch (NoSuchMethodException e) {
             try {
-                Method method = clazz.getDeclaredMethod(methodName);
-                method.setAccessible(true);
-                return method;
+                return clazz.getMethod(methodName);
             } catch (NoSuchMethodException ex) {
                 Class<?> superClass = clazz.getSuperclass();
                 if (superClass != null && superClass != Object.class) {
